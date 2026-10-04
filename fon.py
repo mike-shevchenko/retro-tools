@@ -8,9 +8,12 @@ See fon.py --help.
 
 import argparse
 import codecs
+import collections
 import functools
 import io
 import json
+import logging
+import math
 import os
 import re
 import struct
@@ -24,17 +27,19 @@ try:
 except ImportError:
     Image = None
 
-# fontTools writes the TrueType files. The import is checked when the ttf verb runs.
+# fontTools reads and writes the TrueType files. The import is checked when a verb needs it.
 try:
     from fontTools.fontBuilder import FontBuilder
     from fontTools.pens.ttGlyphPen import TTGlyphPen
-    from fontTools.ttLib import newTable
+    from fontTools.ttLib import TTFont, newTable
 except ImportError:
     FontBuilder = None
 
 USAGE = """\
 Usage: fon.py unpack [--encoding NAME] FILE.FON
        fon.py pack [--encoding NAME] FILE.FON.files
+       fon.py unpack [--encoding NAME] FILE.ttf
+       fon.py pack FILE.ttf.files
        fon.py pack [--encoding NAME] [--rows N] FONT.png|FONT.psd|FONT.txt
        fon.py create [--encoding NAME] FONT
        fon.py ttf [--encoding NAME] [--em N] FILE.FON|FILE.FON.files
@@ -43,9 +48,10 @@ Usage: fon.py unpack [--encoding NAME] FILE.FON
 
 Verbs
 
-  unpack  write the contents of a 16-bit .FON file into the directory FILE.FON.files/
+  unpack  write the contents of a 16-bit .FON file into the directory FILE.FON.files/, or
+          those of a TrueType font of pixels into FILE.ttf.files/
   pack    recreate FILE.FON from the directory FILE.FON.files/, or make FONT.fon, a file
-          of one fixed-pitch font, from its bitmaps alone
+          of one fixed-pitch font, from its bitmaps alone; make FILE.ttf of FILE.ttf.files/
   create  write the directory FONT.fon.files/ of a blank font, to draw a new one in
   ttf     convert every font to TrueType, each pixel a square: a .ttf file named as the font
 
@@ -74,15 +80,21 @@ The files
   already, and so is a FON at the end of the face name. Bold is a dfWeight above 500. Fonts
   that would share a name and differ in dfCharSet get the charset after the size.
 
-  NAME.png    The bitmaps of one font, 32 chars in a row, with no space between chars.
-              The paper of neighboring chars alternates between white and light gray
-              (C0C0C0), and each row starts with the other color than the row above. The ink
-              is dark blue (000080) on white and black on gray. A zero-width char takes no
-              part in the alternation. A row narrower than the image leaves the pixels on its
-              right transparent.
+  NAME.png    The bitmaps of one font, with no space between chars. A row holds the 32
+              chars of the codes 0..31, 32..63 and so on, each in the place of its code
+              modulo 32. The paper of neighboring places alternates between white and
+              light gray (C0C0C0), and each row starts with the other color than the row
+              above. The ink is dark blue (000080) on white and black on gray. The place of
+              a code that the font lacks, or of a zero-width char, is transparent, as wide
+              as the chars usually are; it has its turn in the alternation all the same,
+              and packing passes over transparent pixels wherever they are in a row.
 
   NAME.txt    The same bitmaps as text: X is ink and `.` is paper, chars are separated by `|`,
-              and rows of chars by a line of dashes.
+              and rows of chars by a line of dashes. A place without a char is empty.
+
+  NAME.svg    A picture to lay under the PNG in a graphics editor, which packing does not
+              read: the same cells, and in each the glyph at half its size, the char that it
+              stands for, and its code in hex.
 
 When all chars of a font are equally wide, the bitmaps given for packing may be plainer, and
 the size of the image then tells the chars apart: a row is 32 chars, or all of them when
@@ -147,6 +159,37 @@ Converting to TrueType
   encoding lacks, a control char and a char without pixels are left out. dfDefaultChar is
   the glyph for a missing char.
 
+TrueType fonts of pixels
+
+  unpack takes a TrueType font whose glyphs are drawn of pixels, and pack makes one. The
+  files are ttf.json and the PNG, the text file and the SVG of the one font, as above. The
+  result of packing is a font of the same glyphs and metrics, not the same file: outlines
+  are traced anew, and hinting, kerning and other tables than the basic ones are dropped,
+  which unpack reports.
+
+  The size of a pixel in font units is found as the one whose grid the coordinates of the
+  font agree with best. The bitmap of a glyph is what it shows at one pixel to a pixel
+  without smoothing: the pixels whose centers its outline holds, in a cell as wide as its
+  advance rounded to whole pixels. The glyphs whose points lie within a third of a pixel
+  of the corners of pixels, with edges along their sides, and had to be moved onto the
+  grid are reported; so are, apart, the glyphs that are not drawn of pixels at all, whose
+  bitmaps are then only like them. A font with more of the latter than of the former is
+  refused. The line metrics are rounded to whole pixels.
+
+  In the bitmaps, the places 0..255 are those of an encoding, as in a .FON file: the char
+  that the encoding has for a code is in the row of that code and in the place of the code
+  modulo 32, and a row without a char is left out. With CP1251, a font of Cyrillic letters
+  has them where a Windows font has them. The chars that the encoding lacks follow, 32 to
+  a row, without gaps, in the order of their codes; the glyphs without a code are last.
+  --encoding NAME tells the encoding. Without it, it is the Windows code page that the
+  font declares, when it declares one alone; for any other font it is CP1251, as for the
+  texts. ttf.json records it as encoding.
+
+  ttf.json lists all the glyphs: chars as ranges of Unicode codes in hex, "0020..007E,
+  00A0", and glyphs as names. aliases gives the codes that share the glyph of another code,
+  and zero_width the chars of no width. rows_above_baseline and rows_below_baseline tell
+  where the baseline is in a cell.
+
 Text in the file, such as a face name, is taken to be in the CP1251 encoding, Cyrillic.
 --encoding NAME names another one, by its Python codec name. fon.json records the encoding,
 and packing uses the recorded one unless --encoding says otherwise. A text that the encoding
@@ -164,6 +207,7 @@ it could, and 2 when nothing was done.
 """
 
 JSON_NAME = "fon.json"
+TTF_JSON = "ttf.json"
 FILES_SUFFIX = ".files"
 BACKUP_SUFFIX = ".BAK"
 LINE_WIDTH = 99
@@ -187,7 +231,7 @@ FULL_COLORING = frozenset(CELL_COLORS[0] + CELL_COLORS[1])
 CODE_PREFIX = "U+"
 BLANK_FIRST_CHARS = (0, 32, CODE_PREFIX + "0000", CODE_PREFIX + "0020")
 # How many times larger than a pixel of the bitmaps the SVG picture of them shows it.
-SVG_SCALE = 16
+SVG_SCALE = 8
 PAPER_DISTANCE = 64
 INK_DISTANCE = 120
 INK, PAPER, CHAR_SEPARATOR, ROW_SEPARATOR = "X", ".", "|", "-"
@@ -281,11 +325,33 @@ BLANK_HEIGHT = 8
 PIXEL_UNITS = 64
 MAX_UNITS_PER_EM = 16384
 MAX_COORDINATE = 32767
+# The Windows code pages by the bits with which a TrueType font declares them.
+CODE_PAGES = ("cp1252", "cp1250", "cp1251", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257")
 # The encoding of the chars by dfCharSet, for the charsets that name one.
 CHARSET_ENCODINGS = {
     0: "cp1252", 161: "cp1253", 162: "cp1254", 177: "cp1255", 178: "cp1256", 186: "cp1257",
     204: "cp1251", 238: "cp1250",
 }
+# How a TrueType file begins.
+SFNT_MAGICS = (b"\0\1\0\0", b"true", b"OTTO", b"ttcf")
+# A glyph is one of pixels when its points lie within this of the corners of pixels, in
+# pixels.
+GRID_TOLERANCE = 1 / 3
+# A font has pixels of a size when this share of its coordinates lie this near to the lines
+# of the grid. It is nearer than a fourth, which a grid four times coarser would allow.
+GRID_SHARE = 0.9
+GRID_NEAR = 0.2
+# How many straight pieces stand for a curve of an outline when it is turned into pixels.
+CURVE_PIECES = 16
+MIN_PIXEL_UNITS = 4
+# The tables that unpacking a TrueType font reads; any other is dropped.
+TTF_TABLES = frozenset(("head", "hhea", "maxp", "OS/2", "hmtx", "cmap", "loca", "glyf",
+    "name", "post", "gasp"))
+# The texts of a TrueType font in ttf.json, with the ids that the name table has for them.
+TTF_NAMES = (("copyright", 0), ("family", 1), ("style", 2), ("unique_id", 3),
+    ("full_name", 4), ("version", 5), ("postscript_name", 6), ("trademark", 7),
+    ("manufacturer", 8), ("designer", 9), ("description", 10), ("vendor_url", 11),
+    ("designer_url", 12), ("license", 13), ("license_url", 14))
 STYLES = {(False, False): "Regular", (True, False): "Bold", (False, True): "Italic",
     (True, True): "Bold Italic"}
 # What a font name ends with: the style, and before it the size, as in "zx 6x8px Bold".
@@ -356,7 +422,8 @@ def note(message):
 
 
 def exit_with(main):
-    """Run main, and report a Failure or an unreadable file in one line each."""
+    """Run main, and report a Failure or an unreadable file in one line each. An empty line
+    ends the output of a run, to tell it from that of the next one."""
     try:
         sys.exit(main())
     except Failure as failure:
@@ -373,6 +440,9 @@ def exit_with(main):
     except KeyboardInterrupt:
         note("interrupted")
         sys.exit(130)
+    finally:
+        sys.stdout.flush()
+        sys.stderr.write("\n")
 
 
 def shown(path):
@@ -705,15 +775,14 @@ def key_label(key):
 
 def sheet_boxes(sheet, cells, gap):
     """Where the cells of a sheet lie: the key, the row, the left edge, the width, and which
-    of the two colorings. A slot without pixels, one of no char or of a char of no width,
-    has no cell, and takes the gap."""
+    of the two colorings, which alternate by slot. A slot without pixels, one of no char or
+    of a char of no width, has no cell, and takes the gap."""
     for r, row in enumerate(sheet):
-        left, turn = 0, r
-        for key in row:
+        left = 0
+        for slot, key in enumerate(row):
             width = cells[key][0] if key is not None else 0
             if width:
-                yield key, r, left, width, turn % 2
-                turn += 1
+                yield key, r, left, width, (r + slot) % 2
             left += width or gap
 
 
@@ -763,19 +832,24 @@ def write_svg(path, sheet, cells, height, gap, legend):
         char, code = legend(key)
         if char is not None and unicodedata.category(char)[0] not in "CZ":
             chars.append('<text x="%g" y="%g" font-size="%g">%s</text>' % (left + width * 0.75,
-                top + height * 0.42, min(height * 0.45, width * 0.8), escaped(char)))
-        fit = ""
-        if len(code) * 0.56 * height * 0.3 > width * 0.92:
-            fit = ' textLength="%g" lengthAdjust="spacingAndGlyphs"' % (width * 0.92)
+                top + height * 0.42, min(height * 0.42, width * 0.55), escaped(char)))
+        # A code too long for its cell is set smaller, down to half the size, then squeezed.
+        letters, room, fit = height * 0.42, width * 0.94, ""
+        if len(code) * 0.6 * letters > room:
+            letters = max(room / (len(code) * 0.6), letters / 2)
+            fit = ' font-size="%g"' % letters
+            if len(code) * 0.6 * letters > room * 1.001:
+                fit += ' textLength="%g" lengthAdjust="spacingAndGlyphs"' % room
         codes.append('<text x="%g" y="%g"%s>%s</text>'
-            % (left + width / 2, top + height * 0.9, fit, escaped(code)))
+            % (left + width / 2, top + height * 0.93, fit, escaped(code)))
     font = "font-family=\"'Arial Unicode MS', Arial, sans-serif\" text-anchor=\"middle\""
+    mono = "font-family=\"Consolas, 'Courier New', monospace\" text-anchor=\"middle\""
     lines = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d"'
         ' height="%d">' % (size + (size[0] * SVG_SCALE, size[1] * SVG_SCALE))] + papers + [
         '<g fill="none" stroke="#808080" stroke-width="%g">' % (height / 200)] + frames + [
         '</g>', '<path fill="#000000" d="%s"/>' % "".join(inks),
         '<g fill="#B00000" %s>' % font] + chars + [
-        '</g>', '<g fill="#000080" font-size="%g" %s>' % (height * 0.3, font)] + codes + [
+        '</g>', '<g fill="#000080" font-size="%g" %s>' % (height * 0.42, mono)] + codes + [
         '</g>', '</svg>']
     with open(path, "w", encoding="ascii", newline="\n") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -869,8 +943,8 @@ def read_png_cells(path, image, sheet, zero, height):
     pixels = image.load()
     widths, glyphs = [], []
     for r, row in enumerate(sheet):
-        top, x, turn = r * height, 0, r
-        for key in row:
+        top, x = r * height, 0
+        for slot, key in enumerate(row):
             if key is None:
                 continue
             if key in zero:
@@ -879,19 +953,21 @@ def read_png_cells(path, image, sheet, zero, height):
                 continue
             while x < image.size[0] and column_cell(pixels, x, top, height, path) is None:
                 x += 1
-            start, (paper, ink) = x, CELL_COLORS[turn % 2]
-            while x < image.size[0] and column_cell(pixels, x, top, height, path) == turn % 2:
+            turn = (r + slot) % 2
+            start, (paper, ink) = x, CELL_COLORS[turn]
+            while x < image.size[0] and column_cell(pixels, x, top, height, path) == turn:
                 x += 1
             if x == start:
                 die("%s: row %d of chars has at pixel %d no cell for %s: the image has no"
                     " colors but those that unpack paints with, and then %s paper with %s"
-                    " ink is expected there; the row has fewer chars with pixels than the"
-                    " font has for it, or two neighbors in one coloring" % (shown(path),
-                    r + 1, x, key_label(key), color_name(paper), color_name(ink)))
+                    " ink is expected there, as the papers alternate by the places of a row,"
+                    " those without a char counted; the row has fewer chars with pixels"
+                    " than the font has for it, or two neighbors in one coloring"
+                    % (shown(path), r + 1, x, key_label(key), color_name(paper),
+                    color_name(ink)))
             widths.append(x - start)
             glyphs.append([[int(pixels[at, top + y] == ink) for at in range(start, x)]
                 for y in range(height)])
-            turn += 1
         for at in range(x, image.size[0]):
             if column_cell(pixels, at, top, height, path) is not None:
                 die("%s: row %d of chars has pixels at %d,%d, past its last char; the row has"
@@ -1910,6 +1986,8 @@ def unpack(path, name):
     check_backup(directory)
     with open(path, "rb") as handle:
         data = handle.read()
+    if data[:4] in SFNT_MAGICS:
+        return unpack_ttf(path, data, encoding if name else None)
     report = Report()
     model, fonts = write_files(directory, data, report)
     print("Unpacked %s into %s: %d font(s)."
@@ -1947,10 +2025,10 @@ def is_bitmaps(target):
 
 
 def fon_path_of(directory):
-    """The .FON file that a directory of unpacked files stands for."""
+    """The font file that a directory of unpacked files stands for."""
     if not directory.lower().endswith(FILES_SUFFIX) or len(os.path.basename(directory)) <= len(
             FILES_SUFFIX):
-        die("%s: the directory must be named as the .FON file plus %s"
+        die("%s: the directory must be named as the font file plus %s"
             % (shown_directory(directory), FILES_SUFFIX))
     return directory[:-len(FILES_SUFFIX)]
 
@@ -1966,7 +2044,10 @@ def pack(target, name, rows):
             % shown(directory))
     path = fon_path_of(directory)
     check_backup(path)
-    data = build_from(directory, lambda message: note("Warning: " + message), name)
+    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+        data = build_ttf_from(directory)
+    else:
+        data = build_from(directory, lambda message: note("Warning: " + message), name)
     back_up(path)
     with open(path, "wb") as handle:
         handle.write(data)
@@ -2207,16 +2288,95 @@ def ink_top(rows):
     return len(rows) - inked[0] if inked else 0
 
 
+def make_ttf(info, glyphs, cmap):
+    """A TrueType file. Of info, units is the font units of a pixel, and em, ascent, descent,
+    line_gap, the underline and the average width are in pixels; below is how many rows
+    of a bitmap lie below the baseline; names are texts by their ids in the name table;
+    encoding is the one by which the chars have their codes in the bitmaps.
+    glyphs lists (name, bitmap): the outline of a glyph is that of the pixels of its bitmap,
+    and a glyph without a bitmap is empty, of no width. cmap gives the glyph names of the
+    codes."""
+    need_fonttools()
+    units, em, below = info["units"], info["em"], info["below"]
+    ascent, descent, line_gap = info["ascent"], info["descent"], info["line_gap"]
+    outlines, advances, bitmaps = {}, {}, {}
+    for name, rows in glyphs:
+        if name in outlines:
+            die("%s: more than one glyph is named %s" % (info["label"], name))
+        pen = TTGlyphPen(None)
+        for loop in glyph_contours(rows or []):
+            pen.moveTo((loop[0][0] * units, (loop[0][1] - below) * units))
+            for x, y in loop[1:]:
+                pen.lineTo((x * units, (y - below) * units))
+            pen.closePath()
+        outlines[name], advances[name] = pen.glyph(), len(rows[0]) * units if rows else 0
+        if rows:
+            bitmaps[name] = rows
+    extent = max([em, ascent, descent] + [len(rows) for rows in bitmaps.values()]) * units
+    if units < 1 or em * units > MAX_UNITS_PER_EM or max([extent] + list(advances.values())) > (
+            MAX_COORDINATE):
+        die("%s is too large for TrueType with an em of %d pixels" % (info["label"], em))
+
+    def top_of(char):
+        rows = bitmaps.get(cmap.get(ord(char)))
+        return max(ink_top(rows) - below, 0) * units if rows else 0
+
+    wide = [advance for advance in advances.values() if advance]
+    fixed = len(set(wide)) == 1
+    average = info.get("average")
+    bold, italic = info["bold"], info["italic"]
+    builder = FontBuilder(em * units, isTTF=True)
+    builder.setupGlyphOrder([name for name, _rows in glyphs])
+    builder.setupCharacterMap(cmap)
+    builder.setupGlyf(outlines)
+    builder.setupHorizontalMetrics(dict((name, (advance,
+        getattr(builder.font["glyf"][name], "xMin", 0))) for name, advance in advances.items()))
+    builder.setupHorizontalHeader(ascent=ascent * units, descent=-descent * units,
+        lineGap=line_gap * units)
+    builder.setupNameTable({}, mac=False)
+    for name_id, text in sorted(info["names"].items()):
+        builder.font["name"].setName(text, name_id, 3, 1, 0x409)
+    # Bit 7 of fsSelection has the line spacing taken from the typographic metrics.
+    builder.setupOS2(version=4, sTypoAscender=ascent * units, sTypoDescender=-descent * units,
+        sTypoLineGap=line_gap * units, usWinAscent=ascent * units,
+        usWinDescent=descent * units, usWeightClass=info["weight"],
+        fsSelection=0x80 | (0x20 if bold else 0) | (0x01 if italic else 0)
+        | (0 if bold or italic else 0x40),
+        xAvgCharWidth=average * units if average else sum(wide) // max(len(wide), 1),
+        sxHeight=top_of("x"), sCapHeight=top_of("H"), yStrikeoutSize=units,
+        yStrikeoutPosition=(ascent // 3 + 1) * units)
+    os2 = builder.font["OS/2"]
+    os2.panose.bFamilyType = 2
+    os2.panose.bProportion = 9 if fixed else 0
+    os2.recalcUnicodeRanges(builder.font)
+    os2.recalcCodePageRanges(builder.font)
+    # The code page of the encoding is declared whatever chars of it the font has.
+    if info["encoding"] in CODE_PAGES:
+        os2.ulCodePageRange1 |= 1 << CODE_PAGES.index(info["encoding"])
+    builder.setupPost(isFixedPitch=int(fixed),
+        underlinePosition=info["underline"][0] * units,
+        underlineThickness=info["underline"][1] * units)
+    builder.font["head"].lowestRecPPEM = em
+    builder.font["head"].macStyle = (1 if bold else 0) | (2 if italic else 0)
+    # Bit 0 alone at every size asks for no smoothing.
+    builder.font["gasp"] = gasp = newTable("gasp")
+    gasp.version, gasp.gaspRange = 1, {0xFFFF: 0x0001}
+    data = io.BytesIO()
+    builder.save(data)
+    return data.getvalue()
+
+
+def need_fonttools():
+    if FontBuilder is None:
+        die("fon.py needs fontTools for TrueType fonts: python -m pip install fonttools")
+    # What fontTools remarks on in a font is not about what is done with it here.
+    logging.getLogger("fontTools").setLevel(logging.ERROR)
+
+
 def build_ttf(font, widths, glyphs, chars_encoding, family, style, em):
-    """A TrueType file of one font, and how many chars it has. The outline of a glyph is
-    that of its pixels, in units of which the em has a whole number of pixels."""
+    """A TrueType file of one font of a .FON file, and how many chars it has."""
     header = font["header"]
     height, ascent, first = header["dfPixHeight"], header["dfAscent"], header["dfFirstChar"]
-    descent = height - ascent
-    units = min(PIXEL_UNITS, MAX_UNITS_PER_EM // em)
-    if not units or max([height] + widths) * units > MAX_COORDINATE:
-        die("the font %r is too large for TrueType with an em of %d pixels"
-            % (full_name(family, style), em))
     default = header["dfDefaultChar"]
     blank = [[0] * (header["dfAvgWidth"] or max(widths)) for _y in range(height)]
     bitmaps = {".notdef": glyphs[default] if default < len(glyphs) and widths[default] else blank}
@@ -2230,60 +2390,485 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em):
                 ord(char) not in cmap):
             cmap[ord(char)] = "uni%04X" % ord(char)
             bitmaps[cmap[ord(char)]] = rows
-    outlines = {}
-    for name, rows in bitmaps.items():
-        pen = TTGlyphPen(None)
-        for loop in glyph_contours(rows):
-            pen.moveTo((loop[0][0] * units, (loop[0][1] - descent) * units))
-            for x, y in loop[1:]:
-                pen.lineTo((x * units, (y - descent) * units))
-            pen.closePath()
-        outlines[name] = pen.glyph()
-
-    bold, italic = style.startswith("Bold"), style.endswith("Italic")
-    fixed = len(set(len(rows[0]) for rows in bitmaps.values())) == 1
-    line_gap = header["dfExternalLeading"] * units
     plain = ["".join(char for char in text if char.isascii() and char.isalnum())
         for text in (family, style)]
-    names = {"familyName": family, "styleName": style, "fullName": full_name(family, style),
-        "uniqueFontIdentifier": "%s %s, TrueType" % (family, style),
-        "version": "Version 1.0", "psName": "%s-%s" % (plain[0] or "Font", plain[1])}
+    names = {1: family, 2: style, 3: "%s %s, TrueType" % (family, style),
+        4: full_name(family, style), 5: "Version 1.0",
+        6: "%s-%s" % (plain[0] or "Font", plain[1])}
     copyright = header["dfCopyright"]
     if copyright and not copyright.startswith("hex:"):
-        names["copyright"] = copyright
-    builder = FontBuilder(em * units, isTTF=True)
-    builder.setupGlyphOrder(list(bitmaps))
-    builder.setupCharacterMap(cmap)
-    builder.setupGlyf(outlines)
-    builder.setupHorizontalMetrics(dict((name, (len(rows[0]) * units,
-        getattr(builder.font["glyf"][name], "xMin", 0))) for name, rows in bitmaps.items()))
-    builder.setupHorizontalHeader(ascent=ascent * units, descent=-descent * units,
-        lineGap=line_gap)
-    builder.setupNameTable(names, mac=False)
-    # Bit 7 of fsSelection has the line spacing taken from the typographic metrics.
-    builder.setupOS2(version=4, sTypoAscender=ascent * units, sTypoDescender=-descent * units,
-        sTypoLineGap=line_gap, usWinAscent=ascent * units, usWinDescent=descent * units,
-        usWeightClass=min(max(header["dfWeight"], 1), 1000) if header["dfWeight"] else 400,
-        fsSelection=0x80 | (0x20 if bold else 0) | (0x01 if italic else 0)
-        | (0 if bold or italic else 0x40), xAvgCharWidth=header["dfAvgWidth"] * units,
-        sxHeight=max(ink_top(bitmaps.get("uni0078", [])) - descent, 0) * units,
-        sCapHeight=max(ink_top(bitmaps.get("uni0048", [])) - descent, 0) * units,
-        yStrikeoutSize=units, yStrikeoutPosition=(ascent // 3 + 1) * units)
-    os2 = builder.font["OS/2"]
-    os2.panose.bFamilyType = 2
-    os2.panose.bProportion = 9 if fixed else 0
-    os2.recalcUnicodeRanges(builder.font)
-    os2.recalcCodePageRanges(builder.font)
-    builder.setupPost(isFixedPitch=int(fixed), underlinePosition=-units,
-        underlineThickness=units)
-    builder.font["head"].lowestRecPPEM = em
-    builder.font["head"].macStyle = (1 if bold else 0) | (2 if italic else 0)
-    # Bit 0 alone at every size asks for no smoothing.
-    builder.font["gasp"] = gasp = newTable("gasp")
-    gasp.version, gasp.gaspRange = 1, {0xFFFF: 0x0001}
-    data = io.BytesIO()
-    builder.save(data)
-    return data.getvalue(), len(cmap)
+        names[0] = copyright
+    info = {"label": "the font %r" % full_name(family, style), "names": names,
+        "units": min(PIXEL_UNITS, MAX_UNITS_PER_EM // em), "em": em, "ascent": ascent,
+        "descent": height - ascent, "below": height - ascent,
+        "line_gap": header["dfExternalLeading"], "underline": (-1, 1),
+        "weight": min(max(header["dfWeight"], 1), 1000) if header["dfWeight"] else 400,
+        "bold": style.startswith("Bold"), "italic": style.endswith("Italic"),
+        "average": header["dfAvgWidth"], "encoding": chars_encoding}
+    return make_ttf(info, list(bitmaps.items()), cmap), len(cmap)
+
+
+# ----------------------------------------------------------------------------------------
+# TrueType fonts of pixels
+
+
+def hex_ranges(codes):
+    """Code points as ranges of hex numbers: "0020..007E, 00A0"."""
+    runs = []
+    for code in sorted(codes):
+        if runs and runs[-1][1] == code - 1:
+            runs[-1][1] = code
+        else:
+            runs.append([code, code])
+    return ", ".join("%04X" % low if low == high else "%04X..%04X" % (low, high)
+        for low, high in runs)
+
+
+def parse_hex_ranges(value, where):
+    if not isinstance(value, str):
+        die("%s: must be a string of hex codes and ranges, like \"0020..007E, 00A0\"" % where)
+    codes = set()
+    for part in value.split(","):
+        if not part.strip():
+            continue
+        try:
+            ends = [int(end, 16) for end in part.split("..")]
+        except ValueError:
+            ends = []
+        if len(ends) not in (1, 2) or ends[0] > ends[-1] or ends[-1] > 0x10FFFF:
+            die("%s: %r is not a hex code or a range like 0020..007E" % (where, part.strip()))
+        codes.update(range(ends[0], ends[-1] + 1))
+    return codes
+
+
+def code_key(code):
+    return CODE_PREFIX + "%04X" % code
+
+
+def keys_text(keys):
+    """The chars and the glyphs of some keys, for a message."""
+    codes = [int(key[len(CODE_PREFIX):], 16) for key in keys if key.startswith(CODE_PREFIX)]
+    names = sorted(key for key in keys if not key.startswith(CODE_PREFIX))
+    return "; ".join(text for text in ("chars " + hex_ranges(codes) if codes else "",
+        "glyphs " + ", ".join(names) if names else "") if text)
+
+
+def encoded_chars(chars_encoding):
+    """The chars of an encoding of single bytes, by their codes."""
+    chars = {}
+    for code in range(256):
+        try:
+            char = bytes([code]).decode(chars_encoding)
+        except UnicodeError:
+            continue
+        if len(char) == 1:
+            chars[code] = ord(char)
+    return chars
+
+
+def declared_encoding(declared):
+    """The encoding of the places 0..255 for a font that is unpacked without one told: the
+    Windows code page that the font declares by the bits given, when it declares one
+    alone, and otherwise the one that texts are in unless told. Nothing is made of which
+    chars the font has."""
+    pages = [page for bit, page in enumerate(CODE_PAGES) if declared >> bit & 1]
+    return pages[0] if len(pages) == 1 else DEFAULT_ENCODING
+
+
+def ttf_sheet(codes, names, chars_encoding):
+    """The rows of the bitmaps of a TrueType font: the chars that the encoding has for the
+    codes 0..255, each in the slot of that code modulo 32, without the rows of no char;
+    then the other chars, 32 to a row with no gaps; then the glyphs without a code."""
+    sheet, placed = [], {}
+    for code, char in encoded_chars(chars_encoding).items():
+        if char in codes:
+            placed[code] = char
+    for base in range(0, 256, CHARS_PER_ROW):
+        row = [code_key(placed[code]) if code in placed else None
+            for code in range(base, base + CHARS_PER_ROW)]
+        while row and row[-1] is None:
+            row.pop()
+        if row:
+            sheet.append(row)
+    others = sorted(set(codes) - set(placed.values()))
+    for keys in ([code_key(code) for code in others], list(names)):
+        sheet.extend(keys[at:at + CHARS_PER_ROW] for at in range(0, len(keys), CHARS_PER_ROW))
+    return sheet
+
+
+def pixel_unit(values, em_units):
+    """The size of a pixel in font units, of the coordinates of a font: the one whose grid
+    they agree with best, or one that does nearly as well and has whole pixels to the em.
+    Then a multiple of it, when nearly all of them lie near that coarser grid as well: the
+    few that do not are not of pixels. None when even the finest of these grids has less
+    than the share of the coordinates that a font of pixels has near it."""
+    counts = collections.Counter(abs(value) for value in values if value)
+    total = sum(counts.values())
+    if not total:
+        return None
+
+    def near(size):
+        return sum(count for value, count in counts.items()
+            if abs(value - size * round(value / size)) <= GRID_NEAR * size) / total
+
+    # A value on a line of the grid adds 1, one halfway between two lines takes 1 away.
+    scores = dict((size, sum(count * math.cos(2 * math.pi * value / size)
+        for value, count in counts.items()) / total)
+        for size in range(MIN_PIXEL_UNITS, max(counts) + 1))
+    if not scores:
+        return None
+    best = max(scores.values())
+    close = [size for size, score in scores.items() if score >= best - 0.01]
+    whole = [size for size in close if em_units % size == 0] or close
+    top = max(scores[size] for size in whole)
+    unit = max(size for size in whole if scores[size] >= top - 1e-6)
+    if near(unit) < GRID_SHARE:
+        return None
+    return max(times * unit for times in range(1, max(counts) // unit + 1)
+        if near(times * unit) >= GRID_SHARE)
+
+
+def outline_edges(contour, unit):
+    """A contour of an outline as straight edges in pixels: the points on the curve joined,
+    and each curve, which has a point off it for its control, in pieces."""
+    points = [(x / unit, y / unit, on) for x, y, on in contour]
+    # Between two points off the curve there is one on it, halfway.
+    full = []
+    for at, point in enumerate(points):
+        before = points[at - 1]
+        if not point[2] and not before[2]:
+            full.append(((before[0] + point[0]) / 2, (before[1] + point[1]) / 2, 1))
+        full.append(point)
+    start = next((at for at, point in enumerate(full) if point[2]), None)
+    if start is None:
+        return []
+    full = full[start:] + full[:start + 1]
+    path, at = [full[0][:2]], 1
+    while at < len(full):
+        if full[at][2]:
+            path.append(full[at][:2])
+            at += 1
+            continue
+        (x0, y0), (x1, y1), (x2, y2) = path[-1], full[at][:2], full[at + 1][:2]
+        for piece in range(1, CURVE_PIECES + 1):
+            t = piece / CURVE_PIECES
+            path.append(((1 - t) ** 2 * x0 + 2 * t * (1 - t) * x1 + t * t * x2,
+                (1 - t) ** 2 * y0 + 2 * t * (1 - t) * y1 + t * t * y2))
+        at += 2
+    return list(zip(path, path[1:]))
+
+
+def outline_pixels(contours, unit):
+    """The pixels that an outline shows at one pixel to a pixel without smoothing: those with
+    any winding of it around their centers."""
+    edges = [edge for contour in contours for edge in outline_edges(contour, unit)
+        if edge[0][1] != edge[1][1]]
+    pixels = set()
+    for y in range(math.floor(min([min(a[1], b[1]) for a, b in edges], default=0)),
+            math.ceil(max([max(a[1], b[1]) for a, b in edges], default=0))):
+        center = y + 0.5
+        winding, before = 0, None
+        for x, way in sorted((a[0] + (center - a[1]) / (b[1] - a[1]) * (b[0] - a[0]),
+                1 if b[1] > a[1] else -1) for a, b in edges
+                if (a[1] <= center) != (b[1] <= center)):
+            if winding:
+                pixels.update((at, y) for at in range(math.ceil(before - 0.5),
+                    math.ceil(x - 0.5)))
+            winding, before = winding + way, x
+    return pixels
+
+
+def grid_fit(contours, advance, unit):
+    """How a glyph lies on the grid of pixels: 0 when all of it does, 1 when it is of pixels
+    with points or an advance that lie near the grid, 2 when it is not drawn of pixels."""
+    values = [advance] + [value for contour in contours for x, y, _on in contour
+        for value in (x, y)]
+    if max(abs(value / unit - round(value / unit)) for value in values) > GRID_TOLERANCE:
+        return 2
+    for contour in contours:
+        corners = [(round(x / unit), round(y / unit)) for x, y, _on in contour]
+        if not all(on for _x, _y, on in contour) or any(a[0] != b[0] and a[1] != b[1]
+                for a, b in zip(corners, corners[1:] + corners[:1])):
+            return 2
+    return int(any(value % unit for value in values))
+
+
+def parse_ttf(data, warn, where, chars_encoding=None):
+    """A TrueType font of pixels as the object that ttf.json stores, the sheet of its
+    bitmaps, and their cells by the keys of the sheet. The encoding is that of the places
+    0..255 of the sheet; without one given, the font tells it."""
+    need_fonttools()
+    if data[:4] == SFNT_MAGICS[-1]:
+        die("%s is a collection of fonts, which is not supported" % where)
+    try:
+        font = TTFont(io.BytesIO(data))
+        order = font.getGlyphOrder()
+        cmap = font.getBestCmap()
+    except Exception as error:
+        die("%s cannot be read as a TrueType font: %s" % (where, error))
+    if "glyf" not in font or cmap is None:
+        die("%s has no TrueType outlines, or no Unicode chars; such fonts are not supported"
+            % where)
+    glyf, head, hhea, os2, post = (font[tag] for tag in ("glyf", "head", "hhea", "OS/2", "post"))
+    shapes, hinted = {}, 0
+    for name in order:
+        glyph = glyf[name]
+        coordinates, ends, flags = glyph.getCoordinates(glyf)
+        shapes[name] = [[(coordinates[at][0], coordinates[at][1], flags[at] & 1)
+            for at in range(start, end + 1)] for start, end in zip([0] + [end + 1
+            for end in ends], ends)]
+        program = getattr(glyph, "program", None)
+        hinted += bool(program and (getattr(program, "bytecode", None)
+            or getattr(program, "assembly", None)))
+    advances = dict((name, font["hmtx"][name][0]) for name in order)
+    dropped = sorted(tag for tag in font.keys() if tag not in TTF_TABLES and tag != "GlyphOrder")
+    if dropped or hinted:
+        warn("%s: dropped, and not written back by packing: %s" % (where, "; ".join(
+            text for text in ("the tables %s" % ", ".join(dropped) if dropped else "",
+            "the instructions of %d glyph(s)" % hinted if hinted else "") if text)))
+
+    unit = pixel_unit([value for name in order
+        if all(on for contour in shapes[name] for _x, _y, on in contour)
+        for contour in shapes[name] for x, y, _on in contour for value in (x, y)],
+        head.unitsPerEm)
+    if unit is None:
+        die("%s is not a font of pixels: no grid of %d font units or more has %d%% of its"
+            " points on it" % (where, MIN_PIXEL_UNITS, GRID_SHARE * 100))
+    codes_of = {}
+    for code, name in sorted(cmap.items()):
+        codes_of.setdefault(name, []).append(code)
+    rasters, zero, aliases, pixels_of = {}, [], {}, {}
+    moved, unlike, cut = [], [], []
+    for name in order:
+        codes = codes_of.get(name, [])
+        key = code_key(codes[0]) if codes else name
+        aliases.update(("%04X" % code, "%04X" % codes[0]) for code in codes[1:])
+        width = math.floor(advances[name] / unit + 0.5)
+        pixels = outline_pixels(shapes[name], unit)
+        inside = set((x, y) for x, y in pixels if 0 <= x < width)
+        if width:
+            rasters[key], pixels_of[key] = width, inside
+        elif codes:
+            zero.append(codes[0])
+        if width or codes or pixels:
+            fit = grid_fit(shapes[name], advances[name], unit)
+            (moved if fit == 1 else unlike if fit == 2 else []).append(key)
+            if inside != pixels:
+                cut.append(key)
+    drawn = sum(1 for name in order if shapes[name])
+    if not rasters or 2 * len(unlike) > drawn:
+        die("%s is not a font of pixels: of its %d glyph(s) with outlines, %d are not drawn"
+            " of pixels of %d font units" % (where, drawn, len(unlike), unit))
+
+    rounded = []
+
+    def whole(what, value):
+        if value != round(value):
+            rounded.append("%s %g to %d" % (what, value, round(value)))
+        return round(value)
+
+    em = max(whole("the em", head.unitsPerEm / unit), 1)
+    ascent = max(whole("the ascent", hhea.ascent / unit), 0)
+    descent = max(whole("the descent", -hhea.descent / unit), 0)
+    line_gap = max(whole("the line gap", hhea.lineGap / unit), 0)
+    # A cell holds the line of the font, and all the ink that goes beyond it.
+    rows = [y for pixels in pixels_of.values() for _x, y in pixels]
+    above = max([ascent] + [y + 1 for y in rows])
+    below = max([descent] + [-y for y in rows])
+    above = max(above, 1 - below)
+    cells = dict((key, (width, [[int((x, y) in pixels_of[key]) for x in range(width)]
+        for y in range(above - 1, -below - 1, -1)])) for key, width in rasters.items())
+    if moved:
+        warn("%s: moved onto the grid of pixels, by a third of a pixel at most: %s"
+            % (where, keys_text(moved)))
+    if unlike:
+        warn("%s: not drawn of pixels, and made of the pixels whose centers they hold: %s"
+            % (where, keys_text(unlike)))
+    if cut:
+        warn("%s: wider than their advance, and cut to it: %s" % (where, keys_text(cut)))
+    if rounded:
+        warn("%s: rounded to whole pixels: %s" % (where, ", ".join(rounded)))
+
+    names = {}
+    for key, name_id in TTF_NAMES:
+        text = font["name"].getDebugName(name_id)
+        if text:
+            names[key] = text
+    chars = sorted(int(key[len(CODE_PREFIX):], 16) for key in rasters
+        if key.startswith(CODE_PREFIX))
+    glyphs = [name for name in order if name in rasters and name not in codes_of]
+    chars_encoding = chars_encoding or declared_encoding(getattr(os2, "ulCodePageRange1", 0))
+    model = {
+        "names": names,
+        "units_per_pixel": unit,
+        "em": em,
+        "ascent": ascent,
+        "descent": descent,
+        "line_gap": line_gap,
+        "rows_above_baseline": above,
+        "rows_below_baseline": below,
+        "weight": os2.usWeightClass,
+        "bold": bool(os2.fsSelection & 0x20 or head.macStyle & 1),
+        "italic": bool(os2.fsSelection & 0x01 or head.macStyle & 2),
+        "underline_position": round(post.underlinePosition / unit),
+        "underline_thickness": max(round(post.underlineThickness / unit), 1),
+        "png": None,
+        "txt": None,
+        "encoding": chars_encoding,
+        "chars": hex_ranges(chars),
+        "zero_width": hex_ranges(zero),
+        "aliases": aliases,
+        "glyphs": glyphs,
+    }
+    return model, ttf_sheet(set(chars), glyphs, chars_encoding), cells
+
+
+def usual_width(cells):
+    """The width that most cells have."""
+    return collections.Counter(width for width, _rows in cells.values()).most_common(1)[0][0]
+
+
+def unpack_ttf(path, data, chars_encoding):
+    directory = path + FILES_SUFFIX
+    report = Report()
+    model, sheet, cells = parse_ttf(data, report.warning, shown(path), chars_encoding)
+    names = model["names"]
+    base = file_name(names.get("full_name") or names.get("family")
+        or os.path.splitext(os.path.basename(path))[0])
+    model["png"], model["txt"] = base + ".png", base + ".txt"
+    height = model["rows_above_baseline"] + model["rows_below_baseline"]
+    gap = usual_width(cells)
+    back_up(directory)
+    os.mkdir(directory)
+    write_png(os.path.join(directory, model["png"]), sheet, cells, height, gap)
+    write_svg(os.path.join(directory, base + ".svg"), sheet, cells, height, gap,
+        lambda key: (chr(int(key[len(CODE_PREFIX):], 16)), key[len(CODE_PREFIX):])
+        if key.startswith(CODE_PREFIX) else (None, key))
+    with open(os.path.join(directory, model["txt"]), "w", encoding="ascii",
+            newline="\n") as handle:
+        handle.write("\n".join(text_lines(sheet, cells, height)) + "\n")
+    with open(os.path.join(directory, TTF_JSON), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json_text(model) + "\n")
+    print("Unpacked %s into %s: %d glyph(s), with the chars of %s in the places 0..255; a"
+        " pixel is %d font units, the em %d pixels, a cell %d pixels high."
+        % (shown(path), shown_directory(directory), len(cells), model["encoding"],
+        model["units_per_pixel"], model["em"], height))
+
+    # The files just written are packed in memory, and the result unpacked: that finds what
+    # packing refuses, and whether the glyphs and the metrics come back.
+    try:
+        again, _sheet, cells_again = parse_ttf(build_ttf_from(directory),
+            lambda _message: None, "the font that packing makes", model["encoding"])
+        if dict(again, png=model["png"], txt=model["txt"]) != model or cells_again != cells:
+            report.warning("packing these files gives a font of other glyphs or metrics: %s"
+                % (", ".join(key for key in model if key not in ("png", "txt")
+                and again[key] != model[key]) or "the bitmaps"))
+        else:
+            print("Packing these files gives a font of the same glyphs and metrics.")
+    except Failure as failure:
+        report.error("packing these files will be refused. %s" % failure)
+    if report.errors or report.warnings:
+        print("%d error(s), %d warning(s)." % (report.errors, report.warnings))
+    return 1 if report.errors else 0
+
+
+def whole_number(fields, name, low, high):
+    value = fields.take(name)
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        die("%s.%s: must be a whole number within %d..%d" % (fields.where, name, low, high))
+    return value
+
+
+def build_ttf_from(directory):
+    """The TrueType file that the files in the directory describe."""
+    path = os.path.join(directory, TTF_JSON)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            model = json.load(handle)
+    except ValueError as error:
+        die("%s is not valid JSON: %s" % (shown(path), error))
+    top = Fields(model, TTF_JSON)
+    texts = Fields(top.take("names"), "names")
+    names = {}
+    for key, name_id in TTF_NAMES:
+        text = texts.take(key, None)
+        if text is not None:
+            if not isinstance(text, str):
+                die("names.%s: must be a string" % key)
+            names[name_id] = text
+    texts.done()
+    if 1 not in names:
+        die("names: family is missing")
+    flags = {}
+    for key in ("bold", "italic"):
+        flags[key] = top.take(key)
+        if not isinstance(flags[key], bool):
+            die("%s: must be true or false" % key)
+    names.setdefault(2, STYLES[(flags["bold"], flags["italic"])])
+    names.setdefault(4, full_name(names[1], names[2]))
+    names.setdefault(3, "%s %s, TrueType" % (names[1], names[2]))
+    names.setdefault(5, "Version 1.0")
+    names.setdefault(6, "%s-%s" % tuple("".join(char for char in text
+        if char.isascii() and char.isalnum()) or "Font" for text in (names[1], names[2])))
+    unit = whole_number(top, "units_per_pixel", 1, MAX_UNITS_PER_EM)
+    above = whole_number(top, "rows_above_baseline", -255, 4096)
+    below = whole_number(top, "rows_below_baseline", -255, 4096)
+    if above + below < 1:
+        die("rows_above_baseline and rows_below_baseline must make a cell of 1 row or more")
+    info = dict(flags, label="the font %r" % names[4], names=names, units=unit, below=below,
+        em=whole_number(top, "em", 1, MAX_UNITS_PER_EM),
+        ascent=whole_number(top, "ascent", 0, 4096),
+        descent=whole_number(top, "descent", 0, 4096),
+        line_gap=whole_number(top, "line_gap", 0, 4096),
+        weight=whole_number(top, "weight", 1, 1000),
+        underline=(whole_number(top, "underline_position", -4096, 4096),
+        whole_number(top, "underline_thickness", 0, 4096)))
+    files = (top.take("png"), top.take("txt"))
+    chars_encoding = top.take("encoding")
+    try:
+        chars_encoding = codecs.lookup(chars_encoding).name
+    except (LookupError, TypeError):
+        die("encoding: there is no encoding named %r" % (chars_encoding,))
+    info["encoding"] = chars_encoding
+    chars = parse_hex_ranges(top.take("chars"), "chars")
+    zero = parse_hex_ranges(top.take("zero_width"), "zero_width")
+    extra = top.take_list("glyphs")
+    if any(not isinstance(name, str) or not name or name.startswith(CODE_PREFIX)
+            for name in extra) or len(set(extra)) != len(extra):
+        die("glyphs: must be a list of glyph names, each different")
+    shared = top.take("aliases")
+    if not isinstance(shared, dict):
+        die("aliases: must be an object of hex codes, each with the hex code whose glyph it"
+            " shares")
+    top.done()
+
+    sheet = ttf_sheet(chars, extra, chars_encoding)
+    if not sheet:
+        die("%s: chars and glyphs name no glyph of pixels" % TTF_JSON)
+    height = above + below
+    _widths, bitmaps = load_glyphs(directory, files, sheet, set(), height, None, TTF_JSON,
+        lambda keys: ", ".join(sorted(keys)))
+    cells = dict(zip(sheet_keys(sheet), bitmaps))
+    if chars & zero:
+        die("%s: %s are listed both in chars and in zero_width"
+            % (TTF_JSON, hex_ranges(chars & zero)))
+
+    def name_of(code):
+        return "uni%04X" % code if code <= 0xFFFF else "u%05X" % code
+
+    codes = sorted(chars | zero)
+    glyphs = [(".notdef", cells.get(".notdef"))]
+    glyphs += [(name_of(code), cells.get(code_key(code))) for code in codes]
+    glyphs += [(name, cells[name]) for name in extra if name != ".notdef"]
+    cmap = dict((code, name_of(code)) for code in codes)
+    for code, target in shared.items():
+        here = "aliases.%s" % code
+        code = as_int("0x%s" % code, here, 0x10FFFF)
+        target = as_int("0x%s" % target if isinstance(target, str) else target, here, 0x10FFFF)
+        if code in cmap or target not in codes:
+            die("%s: must be a code without a glyph of its own, for a code that has one" % here)
+        cmap[code] = name_of(target)
+    return make_ttf(info, glyphs, cmap)
 
 
 def ttf_targets(source, fonts):
@@ -2302,8 +2887,7 @@ def ttf_targets(source, fonts):
 
 
 def ttf(target, name, rows, em):
-    if FontBuilder is None:
-        die("fon.py needs fontTools for the ttf verb: python -m pip install fonttools")
+    need_fonttools()
     if em is not None and em < 1:
         die("--em must be 1 or more pixels")
     source = target
@@ -2347,9 +2931,11 @@ def ttf(target, name, rows, em):
 # A verb as its name, its function, its argument and the help for it, the help for
 # --encoding, and its other options, which are numbers passed on in this order.
 VERBS = (
-    ("unpack", unpack, "FILE.FON", "the .FON file to unpack",
-        "the encoding of the texts in the file (default: %s)" % DEFAULT_ENCODING, ()),
-    ("pack", pack, "FILE.FON%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+    ("unpack", unpack, "FILE.FON|FILE.ttf", "the .FON file or the TrueType font to unpack",
+        "the encoding of the texts in a .FON file (default: %s), or of the places 0..255 in"
+        " the bitmaps of a TrueType font (default: the code page that the font declares,"
+        " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ()),
+    ("pack", pack, "FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
         "the directory that unpack made, or the bitmaps of one fixed-pitch font",
         "the encoding to write the texts in (default: the one %s records, or %s without it)"
         % (JSON_NAME, DEFAULT_ENCODING), ("rows",)),
