@@ -44,6 +44,8 @@ Usage: fon.py unpack [--encoding NAME] FILE.FON
        fon.py create [--encoding NAME] FONT
        fon.py ttf [--encoding NAME] [--em N] FILE.FON|FILE.FON.files
        fon.py ttf [--encoding NAME] [--em N] [--rows N] FONT.png|FONT.psd|FONT.txt
+       fon.py expand|contract [--rows N] COLUMNS FILE.files|FONT.png|FONT.psd|FONT.txt
+       fon.py bold|italic|bold-italic [--rows N] FILE.files|FONT.png|FONT.psd|FONT.txt
        fon.py --help
 
 Verbs
@@ -54,6 +56,10 @@ Verbs
           of one fixed-pitch font, from its bitmaps alone; make FILE.ttf of FILE.ttf.files/
   create  write the directory FONT.fon.files/ of a blank font, to draw a new one in
   ttf     convert every font to TrueType, each pixel a square: a .ttf file named as the font
+  expand, contract
+          make the glyphs wider or narrower by repeating or leaving out pixel columns
+  bold, italic, bold-italic
+          make the glyphs bold, slanted, or both, in the same size
 
 An existing target is renamed by appending .BAK to its name first. When that name is taken
 as well, nothing is done.
@@ -137,6 +143,34 @@ Creating
   32..255, of the size that the name tells, as "zx 6x10px" does, or 8x8 pixels each, with
   the ascent at the whole height. Draw the chars in the PNG or in the text file, delete the
   other of the two, and pack.
+
+Altering the bitmaps
+
+  expand, contract, bold, italic and bold-italic take a directory that unpack made, or the
+  bitmaps alone as pack takes them, and write a new directory or a new file beside it,
+  whose name is printed. The source is left as it is.
+
+  COLUMNS lists pixel columns of a glyph, counted from 0 at its left: "0,3,7". contract
+  leaves these columns out of every glyph, and expand has each of them twice, or once more
+  for every time that it is listed. The numbers are those of the columns before the change.
+  A glyph that is too narrow to have a column is left as it is in that column, and a glyph
+  that would be left with no columns at all is not changed.
+
+  bold lays every glyph over itself a pixel to the right, within its width. italic moves
+  the upper half of a cell, the smaller half when the height is odd, a pixel to the right:
+  the column at the right is lost, and the one at the left becomes paper. bold-italic does
+  the one and then the other.
+
+  Of a directory, the fonts get what follows from the change: the widths that fon.json
+  states, a bold weight, the italic flag, and the size at the end of a face name. A font
+  that is bold or italic already is changed all the same, with a warning. A lone image
+  keeps its colors, pixel by pixel; a .psd gives a .png.
+
+  The new name is the old one with the new size or the added style in it: "zx 8x8px.png"
+  contracted by two columns gives "zx 6x8px.png", and made bold, "zx 8x8px Bold.png". A
+  name that tells no size, or whose size is as it was, gets "wide" or "narrow" instead:
+  "COURE narrow.FON.files". The same goes for a face name: "zx 8x8px FON" becomes
+  "zx 6x8px FON", and "Courier" becomes "Courier narrow".
 
 Converting to TrueType
 
@@ -2145,10 +2179,10 @@ def named_size(where, width, height):
     return width, height
 
 
-def fon_of_bitmaps(path, name, rows):
-    """The file of one fixed-pitch font that its bitmaps alone make, and what the font is.
-    The name of the file is the name of the font: its style, and its size if it has one."""
-    set_encoding(name or DEFAULT_ENCODING)
+def lone_bitmaps(path, rows):
+    """The bitmaps of a file that holds them alone, the chars of one fixed-pitch font from
+    32 on: the stem of the font name that the file has, whether the name says bold and
+    italic, the codes, the width and the height of a char, and the glyphs."""
     base, extension = os.path.splitext(path)
     reader = read_text if extension.lower() == ".txt" else read_png
     stem, named_width, named_height, bold, italic = split_name(os.path.basename(base))
@@ -2186,11 +2220,19 @@ def fon_of_bitmaps(path, name, rows):
         die("%s: its name says chars of %s%d pixels, but its bitmaps are of chars %dx%d"
             % (shown(path), "%dx" % named_width if named_width else "", named_height, width,
             height))
+    return stem, bold, italic, codes, width, height, glyphs
+
+
+def fon_of_bitmaps(path, name, rows):
+    """The file of one fixed-pitch font that its bitmaps alone make, and what the font is.
+    The name of the file is the name of the font: its style, and its size if it has one."""
+    set_encoding(name or DEFAULT_ENCODING)
+    stem, bold, italic, codes, width, height, glyphs = lone_bitmaps(path, rows)
     family = (stem + " %dx%dpx" % (width, height)).strip()
     ascent, leading = letter_rows(shown(path), codes, glyphs, height)
-    model, points = new_model(family, os.path.basename(base) + ".fon", width, height, codes,
-        ascent, leading, bold, italic)
-    data = build_fon(model, lambda *_font: (widths, glyphs),
+    model, points = new_model(family, os.path.basename(os.path.splitext(path)[0]) + ".fon",
+        width, height, codes, ascent, leading, bold, italic)
+    data = build_fon(model, lambda *_font: ([width] * len(glyphs), glyphs),
         lambda message: note("Warning: " + message))
     return data, ("the face %r, %s, chars %d..%d, %d points, ascent %d, internal leading %d"
         % (family + FON_SUFFIX, STYLES[(bold, italic)], codes[0], codes[-1], points, ascent,
@@ -2728,13 +2770,11 @@ def usual_width(cells):
     return collections.Counter(width for width, _rows in cells.values()).most_common(1)[0][0]
 
 
-def unpack_ttf(path, data, chars_encoding):
-    directory = path + FILES_SUFFIX
-    report = Report()
-    model, sheet, cells = parse_ttf(data, report.warning, shown(path), chars_encoding)
+def write_ttf_files(directory, model, sheet, cells, fallback):
+    """Write the files of a TrueType font into a new directory. The bitmap files are named
+    after the font, or after the fallback when it has no name."""
     names = model["names"]
-    base = file_name(names.get("full_name") or names.get("family")
-        or os.path.splitext(os.path.basename(path))[0])
+    base = file_name(names.get("full_name") or names.get("family") or fallback)
     model["png"], model["txt"] = base + ".png", base + ".txt"
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
     gap = usual_width(cells)
@@ -2749,6 +2789,15 @@ def unpack_ttf(path, data, chars_encoding):
         handle.write("\n".join(text_lines(sheet, cells, height)) + "\n")
     with open(os.path.join(directory, TTF_JSON), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json_text(model) + "\n")
+
+
+def unpack_ttf(path, data, chars_encoding):
+    directory = path + FILES_SUFFIX
+    report = Report()
+    model, sheet, cells = parse_ttf(data, report.warning, shown(path), chars_encoding)
+    height = model["rows_above_baseline"] + model["rows_below_baseline"]
+    write_ttf_files(directory, model, sheet, cells,
+        os.path.splitext(os.path.basename(path))[0])
     print("Unpacked %s into %s: %d glyph(s), with the chars of %s in the places 0..255; a"
         " pixel is %d font units, the em %d pixels, a cell %d pixels high."
         % (shown(path), shown_directory(directory), len(cells), model["encoding"],
@@ -2770,6 +2819,14 @@ def unpack_ttf(path, data, chars_encoding):
     if report.errors or report.warnings:
         print("%d error(s), %d warning(s)." % (report.errors, report.warnings))
     return 1 if report.errors else 0
+
+
+def made_names(family, style):
+    """The texts of a TrueType font that are made of its family and its style, by their ids
+    in the name table: the unique name, the full name and the PostScript name."""
+    return {3: "%s %s, TrueType" % (family, style), 4: full_name(family, style),
+        6: "%s-%s" % tuple("".join(char for char in text if char.isascii() and char.isalnum())
+        or "Font" for text in (family, style))}
 
 
 def whole_number(fields, name, low, high):
@@ -2805,11 +2862,9 @@ def build_ttf_from(directory):
         if not isinstance(flags[key], bool):
             die("%s: must be true or false" % key)
     names.setdefault(2, STYLES[(flags["bold"], flags["italic"])])
-    names.setdefault(4, full_name(names[1], names[2]))
-    names.setdefault(3, "%s %s, TrueType" % (names[1], names[2]))
+    for name_id, text in made_names(names[1], names[2]).items():
+        names.setdefault(name_id, text)
     names.setdefault(5, "Version 1.0")
-    names.setdefault(6, "%s-%s" % tuple("".join(char for char in text
-        if char.isascii() and char.isalnum()) or "Font" for text in (names[1], names[2])))
     unit = whole_number(top, "units_per_pixel", 1, MAX_UNITS_PER_EM)
     above = whole_number(top, "rows_above_baseline", -255, 4096)
     below = whole_number(top, "rows_below_baseline", -255, 4096)
@@ -2928,8 +2983,285 @@ def ttf(target, name, rows, em):
     return 1 if report.errors else 0
 
 
+# ----------------------------------------------------------------------------------------
+# Altering the bitmaps
+
+
+class Change:
+    """What a verb does to every glyph: its columns left out or repeated, then the overlay
+    that makes it bold, then the slant that makes it italic. The word is what the change of
+    the columns is called in a name."""
+
+    def __init__(self, word=None, columns=(), repeat=False, bold=False, italic=False):
+        self.word, self.columns, self.repeat = word, list(columns), repeat
+        self.bold, self.italic = bold, italic
+
+    def sources(self, width):
+        """The columns of a glyph of a width that make the columns of the new glyph. A
+        glyph that would be left with none keeps them all."""
+        if self.repeat:
+            return [x for x in range(width) for _copy in range(1 + self.columns.count(x))]
+        return [x for x in range(width) if x not in self.columns] or list(range(width))
+
+    def width(self, width):
+        return len(self.sources(width))
+
+    def glyph(self, rows):
+        columns = self.sources(len(rows[0]) if rows else 0)
+        rows = [[row[x] for x in columns] for row in rows]
+        if self.bold:
+            rows = [[int(bit or (x > 0 and row[x - 1])) for x, bit in enumerate(row)]
+                for row in rows]
+        if self.italic:
+            rows = [[0] + row[:-1] if y < len(rows) // 2 and row else row
+                for y, row in enumerate(rows)]
+        return rows
+
+    def image(self, image, width, height, glyphs):
+        """An image of bitmaps alone after the change, each pixel in the color that it had.
+        A pixel that becomes ink takes the color of the ink at its left; the paper that
+        comes in at the left of a slanted row is that of the cell."""
+        image = image.convert("RGBA")
+        old = image.load()
+        columns = self.sources(width)
+        new = Image.new("RGBA", (CHARS_PER_ROW * len(columns), image.size[1]), CLEAR)
+        pixels = new.load()
+        for at, glyph in enumerate(glyphs):
+            left, top = at % CHARS_PER_ROW, at // CHARS_PER_ROW * height
+            colors = [[old[left * width + x, top + y] for x in columns]
+                for y in range(height)]
+            inked = [[row[x] for x in columns] for row in glyph]
+            if self.bold:
+                colors = [[line[x - 1] if x and bits[x - 1] and not bits[x] else color
+                    for x, color in enumerate(line)] for line, bits in zip(colors, inked)]
+                inked = [[int(bit or (x > 0 and bits[x - 1])) for x, bit in enumerate(bits)]
+                    for bits in inked]
+            if self.italic and columns:
+                papers = collections.Counter(color for line, bits in zip(colors, inked)
+                    for color, bit in zip(line, bits) if not bit)
+                paper = papers.most_common(1)[0][0] if papers else old[0, 0]
+                for y in range(height // 2):
+                    colors[y] = [paper if inked[y][0] else colors[y][0]] + colors[y][:-1]
+            for y, line in enumerate(colors):
+                for x, color in enumerate(line):
+                    pixels[left * len(columns) + x, top + y] = color
+        return new
+
+
+def parse_columns(text):
+    try:
+        columns = [int(part) for part in text.split(",")]
+    except ValueError:
+        columns = []
+    if not columns or min(columns) < 0:
+        die("%r must be a list of pixel columns, counted from 0, like 0,3,7" % text)
+    return columns
+
+
+def changed_name(name, change, size):
+    """The name of what a change makes of a font, for a file or a directory named after the
+    font: the size in the name becomes the new one, or is added to it, and the style gains
+    what the change adds. Without a new size to tell, as when the size is as it was or the
+    fonts are several, the word for the change goes before the size."""
+    style = NAME_STYLE.search(name)
+    bold, italic = (bool(word) for word in style.groups())
+    stem = name[:style.start()]
+    named = NAME_SIZE.search(stem)
+    if change.word and size:
+        stem = (stem[:named.start()] if named else stem) + size
+    elif change.word:
+        stem = "%s %s%s" % (stem[:named.start()] if named else stem, change.word,
+            named.group() if named else "")
+    return full_name(stem.strip(), STYLES[(bold or change.bold, italic or change.italic)])
+
+
+def resized(name, old, new, word):
+    """A face name or a family after a change of the columns that has the word given: its
+    size, when it ends with the old one, is the new one; when it tells no size, or the
+    size is as it was, the word goes into it, before that size."""
+    if not word:
+        return name
+    suffix = name[len(name) - len(FON_SUFFIX):] if name.lower().endswith(
+        FON_SUFFIX.lower()) else ""
+    base = name[:len(name) - len(suffix)]
+    size = base[len(base) - len(old):] if base.lower().endswith(old.lower()) else ""
+    stem = base[:len(base) - len(size)]
+    return (stem + new if size and old != new else "%s %s%s" % (stem, word, size)) + suffix
+
+
+def alter_file(path, rows, change):
+    """Write the bitmaps alone of a file, changed, into a new file beside it."""
+    _stem, was_bold, was_italic, _codes, width, height, glyphs = lone_bitmaps(path, rows)
+    base, extension = os.path.splitext(path)
+    new_width = change.width(width)
+    for said, does, what in ((was_bold, change.bold, "bold"),
+            (was_italic, change.italic, "italic")):
+        if said and does:
+            note("Warning: %s is %s already, by its name" % (shown(path), what))
+    target = os.path.join(os.path.dirname(path), changed_name(os.path.basename(base), change,
+        " %dx%dpx" % (new_width, height) if new_width != width else None)) + (
+        ".txt" if extension.lower() == ".txt" else ".png")
+    check_backup(target)
+    changed = [change.glyph(glyph) for glyph in glyphs]
+    sheet = fon_sheet(NEW_FIRST_CHAR, NEW_FIRST_CHAR + len(glyphs) - 1)
+    if extension.lower() == ".txt":
+        cells = dict(zip(sheet_keys(sheet), ((new_width, glyph) for glyph in changed)))
+        back_up(target)
+        with open(target, "w", encoding="ascii", newline="\n") as handle:
+            handle.write("\n".join(text_lines(sheet, cells, height)) + "\n")
+    else:
+        image = change.image(Image.open(path), width, height, glyphs)
+        back_up(target)
+        image.save(target, "PNG")
+    print("Made %s of %s: chars of %dx%d pixels." % (shown(target), shown(path), new_width,
+        height))
+    return 0
+
+
+def alter_fon(directory, name, change, warn):
+    """The .FON file of the fonts of a directory, changed, and the new size of its font as
+    a name has it, when it holds one font alone and the size is another than it was."""
+    build_from(directory, lambda _message: None, name)
+    with open(os.path.join(directory, JSON_NAME), encoding="utf-8") as handle:
+        model = json.load(handle)
+    changed, sizes, same = {}, [], True
+    for t, one in enumerate(model["resource_table"]["types"]):
+        for r, resource in enumerate(one["resources"]):
+            if "font" not in resource:
+                continue
+            where = "resource_table.types[%d].resources[%d].font" % (t, r)
+            font = resource["font"]
+            header = font["header"]
+            stated = dict((key, as_int(header[key], where, 0xFFFF)) for key in (
+                "dfFirstChar", "dfLastChar", "dfPixHeight", "dfPixWidth", "dfAvgWidth",
+                "dfMaxWidth", "dfPitchAndFamily", "dfWeight", "dfItalic"))
+            first, last = stated["dfFirstChar"], stated["dfLastChar"]
+            widths, glyphs = load_glyphs(directory, (font["png"], font["txt"]),
+                fon_sheet(first, last), parse_ranges(font["zero_width"], where, first, last),
+                stated["dfPixHeight"], False if stated["dfPitchAndFamily"] & 1
+                else stated["dfPixWidth"] or None, where)
+            glyphs = [change.glyph(glyph) for glyph in glyphs]
+            new_widths = [len(glyph[0]) for glyph in glyphs]
+            old = size_suffix(stated, widths)
+            for key in ("dfPixWidth", "dfAvgWidth", "dfMaxWidth"):
+                header[key] = change.width(stated[key])
+            # A narrow glyph that is not changed may be left wider than the widest one is.
+            header["dfMaxWidth"] = max([header["dfMaxWidth"]] + new_widths)
+            sizes.append(size_suffix(dict(stated, dfPixWidth=header["dfPixWidth"]), new_widths))
+            same = same and old == sizes[-1]
+            if isinstance(font["face_name"], str) and not font["face_name"].startswith("hex:"):
+                font["face_name"] = resized(font["face_name"], old, sizes[-1], change.word)
+            if change.bold and stated["dfWeight"] > 500:
+                warn("%s: is bold already, of the weight %d" % (where, stated["dfWeight"]))
+            elif change.bold:
+                header["dfWeight"] = 700
+            if change.italic and stated["dfItalic"]:
+                warn("%s: is italic already" % where)
+            elif change.italic:
+                header["dfItalic"] = 1
+            changed[where] = (new_widths, glyphs)
+    data = build_fon(model, lambda _names, _sheet, _zero, _height, _plain, where: changed[where],
+        warn)
+    return data, sizes[0] if len(sizes) == 1 and not same else None
+
+
+def alter_ttf(directory, change, warn):
+    """The ttf.json object, the sheet and the cells of the font of a directory, changed, and
+    the new size of the font as a name has it, when it is another than it was."""
+    build_ttf_from(directory)
+    with open(os.path.join(directory, TTF_JSON), encoding="utf-8") as handle:
+        model = json.load(handle)
+    chars = parse_hex_ranges(model["chars"], "chars")
+    height = model["rows_above_baseline"] + model["rows_below_baseline"]
+    sheet = ttf_sheet(chars, model["glyphs"], model["encoding"])
+    _widths, bitmaps = load_glyphs(directory, (model["png"], model["txt"]), sheet, set(),
+        height, None, TTF_JSON, lambda keys: ", ".join(sorted(keys)))
+    keys = sheet_keys(sheet)
+
+    def size_of(glyphs):
+        widths = set(len(glyph[0]) for glyph in glyphs)
+        return " %s%dpx" % ("%dx" % widths.pop() if len(widths) == 1 else "", height)
+
+    old = size_of(bitmaps)
+    cells = dict((key, (len(glyph[0]), glyph)) for key, glyph
+        in zip(keys, (change.glyph(glyph) for glyph in bitmaps)))
+    new = size_of([glyph for _width, glyph in cells.values()])
+    names = model["names"]
+    before = (names["family"], names.get("style", STYLES[(model["bold"], model["italic"])]))
+    for flag, does in (("bold", change.bold), ("italic", change.italic)):
+        if does and model[flag]:
+            warn("%s: the font is %s already" % (TTF_JSON, flag))
+        model[flag] = bool(model[flag] or does)
+    if change.bold and model["weight"] < 600:
+        model["weight"] = 700
+    names["family"] = resized(names["family"], old, new, change.word)
+    if before[1] in STYLES.values():
+        names["style"] = STYLES[(model["bold"], model["italic"])]
+    # The texts that were made of the family and the style are made of the new ones.
+    was, now = made_names(*before), made_names(names["family"], names.get("style", before[1]))
+    for key, name_id in TTF_NAMES:
+        if name_id in was and names.get(key) == was[name_id]:
+            names[key] = now[name_id]
+    return model, sheet, cells, new if new != old else None
+
+
+def alter(target, name, rows, change):
+    if is_bitmaps(target):
+        return alter_file(target, rows, change)
+    if rows is not None:
+        die(ROWS_MISPLACED)
+    directory = target.rstrip("/\\")
+    if not os.path.isdir(directory):
+        die("%s is neither a directory that unpack made, nor a .png, a .psd or a .txt"
+            % shown(directory))
+    root, extension = os.path.splitext(os.path.basename(fon_path_of(directory)))
+
+    def warn(message):
+        note("Warning: " + message)
+
+    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+        model, sheet, cells, size = alter_ttf(directory, change, warn)
+    else:
+        data, size = alter_fon(directory, name, change, warn)
+    target = os.path.join(os.path.dirname(directory),
+        changed_name(root, change, size) + extension + FILES_SUFFIX)
+    check_backup(target)
+    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+        write_ttf_files(target, model, sheet, cells, root)
+        count = 1
+    else:
+        count = len(write_files(target, data, Report())[1])
+    print("Made %s of %s: %d font(s)." % (shown_directory(target), shown_directory(directory),
+        count))
+    return 0
+
+
+def expand(target, name, columns, rows):
+    return alter(target, name, rows, Change("wide", parse_columns(columns), True))
+
+
+def contract(target, name, columns, rows):
+    return alter(target, name, rows, Change("narrow", parse_columns(columns)))
+
+
+def bold(target, name, rows):
+    return alter(target, name, rows, Change(bold=True))
+
+
+def italic(target, name, rows):
+    return alter(target, name, rows, Change(italic=True))
+
+
+def bold_italic(target, name, rows):
+    return alter(target, name, rows, Change(bold=True, italic=True))
+
+
+ALTERED = ("FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+    "the directory that unpack made, or the bitmaps of one fixed-pitch font",
+    "the encoding of the texts of a .FON file (default: the one %s records)" % JSON_NAME)
 # A verb as its name, its function, its argument and the help for it, the help for
-# --encoding, and its other options, which are numbers passed on in this order.
+# --encoding, and its other options: columns, which is an argument before the other one,
+# and numbers, all passed on in this order.
 VERBS = (
     ("unpack", unpack, "FILE.FON|FILE.ttf", "the .FON file or the TrueType font to unpack",
         "the encoding of the texts in a .FON file (default: %s), or of the places 0..255 in"
@@ -2946,11 +3278,18 @@ VERBS = (
         "the .FON file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
         "the encoding of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names)", ("rows", "em")),
+    ("expand", expand) + ALTERED + (("columns", "rows"),),
+    ("contract", contract) + ALTERED + (("columns", "rows"),),
+    ("bold", bold) + ALTERED + (("rows",),),
+    ("italic", italic) + ALTERED + (("rows",),),
+    ("bold-italic", bold_italic) + ALTERED + (("rows",),),
 )
 OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
     "em": "the height of the em in pixels (default: the height of the chars)",
+    "columns": "the pixel columns of a glyph to repeat or to leave out, counted from 0, as"
+        " 0,3,7",
 }
 
 
@@ -2965,10 +3304,13 @@ def main():
     run, target, target_help, encoding_help, options = verbs[argv[0]]
     parser = argparse.ArgumentParser(prog="fon.py " + argv[0],
         epilog="fon.py --help describes the files.")
+    if "columns" in options:
+        parser.add_argument("columns", metavar="COLUMNS", help=OPTIONS["columns"])
     parser.add_argument("target", metavar=target, help=target_help)
     parser.add_argument("--encoding", metavar="NAME", help=encoding_help)
     for option in options:
-        parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
+        if option != "columns":
+            parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
     args = parser.parse_args(argv[1:])
     if Image is None:
         die("fon.py needs Pillow for the PNG files: python -m pip install pillow")
