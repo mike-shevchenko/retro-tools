@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unpack a Windows .FON font file into editable files, pack them back, make a new one, or
+"""Unpack a Windows .fon font file into editable files, pack them back, make a new one, or
 convert one to TrueType.
 
 See fon.py --help.
@@ -36,216 +36,54 @@ except ImportError:
     FontBuilder = None
 
 USAGE = """\
-Usage: fon.py unpack [--encoding NAME] FILE.FON
-       fon.py pack [--encoding NAME] FILE.FON.files
-       fon.py unpack [--encoding NAME] FILE.ttf
-       fon.py pack FILE.ttf.files
-       fon.py pack [--encoding NAME] [--rows N] FONT.png|FONT.psd|FONT.txt
-       fon.py create [--encoding NAME] FONT
-       fon.py ttf [--encoding NAME] [--em N] FILE.FON|FILE.FON.files
-       fon.py ttf [--encoding NAME] [--em N] [--rows N] FONT.png|FONT.psd|FONT.txt
-       fon.py expand|contract [--rows N] COLUMNS FILE.files|FONT.png|FONT.psd|FONT.txt
-       fon.py bold|italic|bold-italic [--rows N] FILE.files|FONT.png|FONT.psd|FONT.txt
-       fon.py --help
+Usage:
+fon unpack [--encoding NAME] FILE.fon|FILE.ttf
+fon pack [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
+fon create [--encoding NAME] FONT
+fon ttf [--encoding NAME] [--em N] [--rows N] FILE.fon|DIR.files|FONT.png|...
+fon expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
+fon bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 
-Verbs
+unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
+  FILE.files/. It reports what is broken, and whether packing gives the same file back.
+pack: make the font file of DIR.files/, which any inconsistency in the files stops; or make
+  FONT.fon, one fixed-pitch font of the chars from 32 on, of its bitmaps alone.
+create: write FONT.fon.files/ of a blank font, 8x8 or of the size in the name: "zx 6x10px".
+ttf: make a TrueType file of every font, each pixel a square, exact at --em pixels to the em
+  (unless told, the height) and its multiples. Chars get Unicode by dfCharSet or --encoding.
+expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph: "0,3,7".
+bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
+  half of each cell a pixel to the right. These five write a new file or directory.
 
-  unpack  write the contents of a 16-bit .FON file into the directory FILE.FON.files/, or
-          those of a TrueType font of pixels into FILE.ttf.files/
-  pack    recreate FILE.FON from the directory FILE.FON.files/, or make FONT.fon, a file
-          of one fixed-pitch font, from its bitmaps alone; make FILE.ttf of FILE.ttf.files/
-  create  write the directory FONT.fon.files/ of a blank font, to draw a new one in
-  ttf     convert every font to TrueType, each pixel a square: a .ttf file named as the font
-  expand, contract
-          make the glyphs wider or narrower by repeating or leaving out pixel columns
-  bold, italic, bold-italic
-          make the glyphs bold, slanted, or both, in the same size
+An existing target is renamed to .BAK first; when that name is taken too, the job fails.
 
-An existing target is renamed by appending .BAK to its name first. When that name is taken
-as well, nothing is done.
+The files of a directory, for each font:
+  fon.json or ttf.json: every field. One named _x is computed by pack, which ignores it.
+  NAME.png: the bitmaps, 32 places to a row, a char at its code modulo 32. The papers are
+    white and C0C0C0 by turns; the ink is 000080 on white and black on gray. A place of no
+    char, or of a zero-width char, is transparent.
+  NAME.txt: the same as text: X ink, `.` paper, `|` between chars, dashes between rows.
+  NAME.svg: a picture to lay under the PNG, with the char and the code in each cell.
+  pack takes the PNG or the text; when both are there they must agree: delete the old one.
 
-The files
+A fixed-pitch font may have plainer bitmaps: text without the `|` and the dashes, and a PNG
+  or a Photoshop .psd in any colors. Its first cell, blank, tells the paper: a color within
+  64 of it in every channel is paper, 120 or more away in some is ink; transparent is paper.
 
-  fon.json    Every field of the file and of the fonts in it, as nested objects: the MZ and
-              NE headers, the resource table, the name tables, and each resource. Sizes,
-              offsets, counts and metrics are decimal numbers; identifiers, versions and bit
-              masks are "0x..." strings, and either form is accepted when packing.
+Bitmaps alone: the file is named as the font, "zx 6x8px Bold.png". The size in the name
+  tells the rows, or --rows N does: 7 unless told, the chars 32..255. E, F, H, L, T and Z
+  give the ascent. The glyph at 127 is shown for a missing char. The face ends with " FON".
 
-              A field whose name starts with `_` is computed when packing: sizes, offsets
-              and counts that follow from the rest. Unpacking writes what the file had there,
-              and packing ignores it.
+Names: a font is named by its face, its size, "6x8px" or "13px" when the widths differ, and
+  Bold, Italic. The bitmap files, the .ttf files and what the altering verbs write are named
+  so; a new width gives a new size, or "wide" or "narrow" when the name tells no size.
 
-              The chars of a font are dfFirstChar..dfLastChar. Their widths come from the
-              bitmaps, and their offsets from packing them back to back. zero_width lists the
-              chars that have no pixels, as ranges like "127..160, 240".
+TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the grid are
+  reported, hinting and kerning dropped. The places 0..255 follow --encoding, or the one
+  code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
 
-  The bitmap files of a font take the name of the font, which is its face name, its size
-  and its style: "Courier 8x13px Bold Italic". The size is the height of the chars, with
-  their width before it when they have one width, or when dfPixWidth states one: "13px" for
-  a font of chars 2 to 11 pixels wide. It is left out when the face name ends with it
-  already, and so is a FON at the end of the face name. Bold is a dfWeight above 500. Fonts
-  that would share a name and differ in dfCharSet get the charset after the size.
-
-  NAME.png    The bitmaps of one font, with no space between chars. A row holds the 32
-              chars of the codes 0..31, 32..63 and so on, each in the place of its code
-              modulo 32. The paper of neighboring places alternates between white and
-              light gray (C0C0C0), and each row starts with the other color than the row
-              above. The ink is dark blue (000080) on white and black on gray. The place of
-              a code that the font lacks, or of a zero-width char, is transparent, as wide
-              as the chars usually are; it has its turn in the alternation all the same,
-              and packing passes over transparent pixels wherever they are in a row.
-
-  NAME.txt    The same bitmaps as text: X is ink and `.` is paper, chars are separated by `|`,
-              and rows of chars by a line of dashes. A place without a char is empty.
-
-  NAME.svg    A picture to lay under the PNG in a graphics editor, which packing does not
-              read: the same cells, and in each the glyph at half its size, the char that it
-              stands for, and its code in hex.
-
-When all chars of a font are equally wide, the bitmaps given for packing may be plainer, and
-the size of the image then tells the chars apart: a row is 32 chars, or all of them when
-there are fewer.
-
-  NAME.png    May be in other colors when the first char is blank, which char 32 or 0 is
-              taken to be: its color is the paper. A color that differs from it by 64 or
-              less in every channel is paper as well, one that differs by 120 or more in
-              some channel is ink, and a color in between is refused. A transparent pixel
-              is paper. Which colors were taken for what is printed. The width must divide
-              by the chars in a row, and the height by the rows.
-
-              An image that has both papers of the coloring above, no color but the four,
-              and not black for its only ink, is read by that coloring.
-
-  NAME.txt    May leave out the `|`, the lines of dashes, or both. The lines of dashes may
-              be left out for chars of different widths as well.
-
-Packing bitmaps alone
-
-  Given such a PNG or text file in place of a directory, pack makes a font of the chars
-  from 32 on, 32 to a row. A Photoshop .psd does for the PNG: what is read of it is the
-  flattened image, which Photoshop stores when Maximize Compatibility is on.
-
-  The file is named as the font is to be: "zx 6x8px Bold.png" makes a bold font of the
-  family "zx 6x8px". A size in the name must be the size of the chars in the file, and
-  tells how many rows the file holds; without it, --rows N does, and the rows are 7 unless
-  told, which is the chars 32..255. The face name is the family with FON after it,
-  "zx 6x8px FON", which keeps the font apart from the TrueType one of the same family where
-  both are installed.
-
-  The letters E, F, H, L, T and Z give the ascent, which is where they end, and the
-  internal leading, which is the rows above them; they must all start on one row and end on
-  one row. The point size follows. Every other field is set as the fixed-pitch fonts
-  shipped with Windows have it; to change one, unpack the result, edit fon.json and pack.
-
-  The char 127 is the default char of the font, as it is in those fonts: its glyph is
-  what is shown for a char that the font lacks, and ttf makes it the glyph of a missing
-  char in the TrueType font as well. A file that stops short of 127 has the space for it.
-
-Creating
-
-  create writes what unpack would write for such a file whose font is blank: the chars
-  32..255, of the size that the name tells, as "zx 6x10px" does, or 8x8 pixels each, with
-  the ascent at the whole height. Draw the chars in the PNG or in the text file, delete the
-  other of the two, and pack.
-
-Altering the bitmaps
-
-  expand, contract, bold, italic and bold-italic take a directory that unpack made, or the
-  bitmaps alone as pack takes them, and write a new directory or a new file beside it,
-  whose name is printed. The source is left as it is.
-
-  COLUMNS lists pixel columns of a glyph, counted from 0 at its left: "0,3,7". contract
-  leaves these columns out of every glyph, and expand has each of them twice, or once more
-  for every time that it is listed. The numbers are those of the columns before the change.
-  A glyph that is too narrow to have a column is left as it is in that column, and a glyph
-  that would be left with no columns at all is not changed.
-
-  bold lays every glyph over itself a pixel to the right, within its width. italic moves
-  the upper half of a cell, the smaller half when the height is odd, a pixel to the right:
-  the column at the right is lost, and the one at the left becomes paper. bold-italic does
-  the one and then the other.
-
-  Of a directory, the fonts get what follows from the change: the widths that fon.json
-  states, a bold weight, the italic flag, and the size at the end of a face name. A font
-  that is bold or italic already is changed all the same, with a warning. A lone image
-  keeps its colors, pixel by pixel; a .psd gives a .png.
-
-  The new name is the old one with the new size or the added style in it: "zx 8x8px.png"
-  contracted by two columns gives "zx 6x8px.png", and made bold, "zx 8x8px Bold.png". A
-  name that tells no size, or whose size is as it was, gets "wide" or "narrow" instead:
-  "COURE narrow.FON.files". The same goes for a face name: "zx 8x8px FON" becomes
-  "zx 6x8px FON", and "Courier" becomes "Courier narrow".
-
-Converting to TrueType
-
-  ttf takes a .FON file, a directory that unpack made, or the bitmaps alone as pack takes
-  them. The outline of a glyph is the outline of its pixels, a square each, with nothing
-  smoothed, and the ascent, the descent and the widths are those of the font.
-
-  Every font gives a file of its own beside the source, named as the font is. The family
-  is that name without the style, so the styles of one face and size make one family, and
-  the sizes of one face make a family each, as each is a design of its own. Two fonts of
-  one name are refused; tell them apart by their face names in fon.json.
-
-  --em N is the height of the em in pixels: the size at which a pixel of the font is a
-  pixel of the screen, as it is at 2N, 3N and so on, and at no size in between. It is the
-  height of the chars unless told. With dfPixHeight minus dfInternalLeading for N, Windows
-  reports for the TrueType font the metrics that it reports for the original.
-
-  The chars get their Unicode values by the encoding that dfCharSet names, or by the
-  encoding of the texts when it names none; --encoding overrides both. A char that the
-  encoding lacks, a control char and a char without pixels are left out. dfDefaultChar is
-  the glyph for a missing char.
-
-TrueType fonts of pixels
-
-  unpack takes a TrueType font whose glyphs are drawn of pixels, and pack makes one. The
-  files are ttf.json and the PNG, the text file and the SVG of the one font, as above. The
-  result of packing is a font of the same glyphs and metrics, not the same file: outlines
-  are traced anew, and hinting, kerning and other tables than the basic ones are dropped,
-  which unpack reports.
-
-  The size of a pixel in font units is found as the one whose grid the coordinates of the
-  font agree with best. The bitmap of a glyph is what it shows at one pixel to a pixel
-  without smoothing: the pixels whose centers its outline holds, in a cell as wide as its
-  advance rounded to whole pixels. The glyphs whose points lie within a third of a pixel
-  of the corners of pixels, with edges along their sides, and had to be moved onto the
-  grid are reported; so are, apart, the glyphs that are not drawn of pixels at all, whose
-  bitmaps are then only like them. A font with more of the latter than of the former is
-  refused. The line metrics are rounded to whole pixels.
-
-  In the bitmaps, the places 0..255 are those of an encoding, as in a .FON file: the char
-  that the encoding has for a code is in the row of that code and in the place of the code
-  modulo 32, and a row without a char is left out. With CP1251, a font of Cyrillic letters
-  has them where a Windows font has them. The chars that the encoding lacks follow, 32 to
-  a row, without gaps, in the order of their codes; the glyphs without a code are last.
-  The glyph of a missing char, .notdef, is in the place 127, where a .FON font has its
-  default char, unless a char is there: then it is with the glyphs without a code, and
-  unpack says so.
-
-  --encoding NAME tells the encoding. Without it, it is the Windows code page that the
-  font declares, when it declares one alone; for any other font it is CP1251, as for the
-  texts. ttf.json records it as encoding.
-
-  ttf.json lists all the glyphs: chars as ranges of Unicode codes in hex, "0020..007E,
-  00A0", and glyphs as names. aliases gives the codes that share the glyph of another code,
-  and zero_width the chars of no width. rows_above_baseline and rows_below_baseline tell
-  where the baseline is in a cell.
-
-Text in the file, such as a face name, is taken to be in the CP1251 encoding, Cyrillic.
---encoding NAME names another one, by its Python codec name. fon.json records the encoding,
-and packing uses the recorded one unless --encoding says otherwise. A text that the encoding
-cannot express is written as "hex:" and its bytes in hex.
-
-Unpacking reports whatever in the file is broken or inconsistent, and writes the files as
-well as it can; it then says whether packing them would give the same file back.
-
-Packing needs fon.json and, for every font, its PNG or its text file. When both are there,
-they must hold the same bitmaps; delete the one that was not edited. Any error or
-inconsistency in the files stops the packing, and nothing is written.
-
-The exit status is 0 on success, 1 when unpacking found errors in the file and wrote what
-it could, and 2 when nothing was done.
+--encoding NAME: the encoding of texts and chars, a Python codec; cp1251 unless recorded.
+Exit status: 0 success; 1 unpack found errors and wrote what it could; 2 nothing done.
 """
 
 JSON_NAME = "fon.json"
@@ -1449,12 +1287,12 @@ def parse_fon(data, report):
     """The whole file as the model fon.json stores, and for each raster font its object,
     widths and glyphs."""
     if len(data) < MZ_SIZE or data[:2] != b"MZ":
-        die("not a .FON file: it has no MZ header")
+        die("not a .fon file: it has no MZ header")
     ne_at = raw_fields(MZ_HEADER, data, 0)["e_lfanew"]
     if ne_at < MZ_SIZE or data[ne_at:ne_at + 2] != b"NE" or ne_at + NE_SIZE > len(data):
         if data[ne_at:ne_at + 4] == b"PE\0\0":
             die("a 32-bit (PE) file; only 16-bit (NE) font files are supported")
-        die("not a .FON file: it has no NE header")
+        die("not a .fon file: it has no NE header")
     ne = raw_fields(NE_HEADER, data, ne_at)
     if ne["ne_cseg"] or ne["ne_cmod"]:
         report.warning("the file has %d segment(s) and %d imported module(s), which a font"
@@ -1859,7 +1697,7 @@ def build_fon(model, load, warn):
 
 
 def build_from(directory, warn, name=None):
-    """The .FON file that the files in the directory describe. Its texts are in the encoding
+    """The .fon file that the files in the directory describe. Its texts are in the encoding
     named, or else in the one that fon.json records."""
     path = os.path.join(directory, JSON_NAME)
     try:
@@ -2000,7 +1838,7 @@ def back_up(path):
 
 
 def write_files(directory, data, report):
-    """Write what a .FON file holds into the directory: the model and the fonts written."""
+    """Write what a .fon file holds into the directory: the model and the fonts written."""
     model, fonts = parse_fon(data, report)
     name_fonts(fonts)
     back_up(directory)
@@ -2429,7 +2267,7 @@ def need_fonttools():
 
 
 def build_ttf(font, widths, glyphs, chars_encoding, family, style, em):
-    """A TrueType file of one font of a .FON file, and how many chars it has."""
+    """A TrueType file of one font of a .fon file, and how many chars it has."""
     header = font["header"]
     height, ascent, first = header["dfPixHeight"], header["dfAscent"], header["dfFirstChar"]
     default = header["dfDefaultChar"]
@@ -3140,7 +2978,7 @@ def alter_file(path, rows, change):
 
 
 def alter_fon(directory, name, change, warn):
-    """The .FON file of the fonts of a directory, changed, and the new size of its font as
+    """The .fon file of the fonts of a directory, changed, and the new size of its font as
     a name has it, when it holds one font alone and the size is another than it was."""
     build_from(directory, lambda _message: None, name)
     with open(os.path.join(directory, JSON_NAME), encoding="utf-8") as handle:
@@ -3279,13 +3117,13 @@ def bold_italic(target, name, rows):
 
 ALTERED = ("FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
     "the directory that unpack made, or the bitmaps of one fixed-pitch font",
-    "the encoding of the texts of a .FON file (default: the one %s records)" % JSON_NAME)
+    "the encoding of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
 # A verb as its name, its function, its argument and the help for it, the help for
 # --encoding, and its other options: columns, which is an argument before the other one,
 # and numbers, all passed on in this order.
 VERBS = (
-    ("unpack", unpack, "FILE.FON|FILE.ttf", "the .FON file or the TrueType font to unpack",
-        "the encoding of the texts in a .FON file (default: %s), or of the places 0..255 in"
+    ("unpack", unpack, "FILE.fon|FILE.ttf", "the .fon file or the TrueType font to unpack",
+        "the encoding of the texts in a .fon file (default: %s), or of the places 0..255 in"
         " the bitmaps of a TrueType font (default: the code page that the font declares,"
         " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ()),
     ("pack", pack, "FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
@@ -3295,8 +3133,8 @@ VERBS = (
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
         "the encoding to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
-    ("ttf", ttf, "FILE.FON|FILE.FON%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
-        "the .FON file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
+    ("ttf", ttf, "FILE.fon|FILE.fon%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+        "the .fon file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
         "the encoding of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names)", ("rows", "em")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
