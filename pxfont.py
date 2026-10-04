@@ -40,7 +40,7 @@ Usage:
 pxfont unpack [--encoding NAME] FILE.fon|FILE.ttf
 pxfont fon [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 pxfont create [--encoding NAME] FONT
-pxfont ttf [--encoding NAME] [--em N] [--rows N] FILE.fon|DIR.files|FONT.png|...
+pxfont ttf [--encoding NAME] [--em N] [--rows N] [--aliases LIST] FILE.fon|DIR.files|...
 pxfont expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
 pxfont bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 
@@ -81,6 +81,7 @@ TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the 
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
 
 --encoding NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
+--aliases 00A9=.notdef,00A3=0060: ttf adds chars with the glyph of a missing or another char.
 """
 
 JSON_NAME = "fon.json"
@@ -2382,8 +2383,26 @@ def need_fonttools():
     logging.getLogger("fontTools").setLevel(logging.ERROR)
 
 
-def build_ttf(font, widths, glyphs, chars_encoding, family, style, em):
-    """A TrueType file of one font of a .fon file, and how many chars it has."""
+def parse_aliases(text):
+    """The pairs that --aliases lists: the code of a Unicode char, and whose glyph it is
+    given: MISSING_GLYPH, or the code of a char that the font has."""
+    pairs = []
+    for item in text.split(","):
+        found = re.fullmatch(r"\s*(?:U\+)?([0-9A-F]{4,6})\s*=\s*(?:(%s)|(?:U\+)?([0-9A-F]{4,6}))"
+            r"\s*" % re.escape(MISSING_GLYPH), item, re.IGNORECASE)
+        codes = [int(part, 16) for part in found.group(1, 3) if part] if found else [-1]
+        if not 0 <= max(codes) <= 0x10FFFF:
+            die("--aliases: %r must be a Unicode char, as 00A9 or U+00A9, then = and what"
+                " gives it the glyph: %s or another char" % (item.strip(), MISSING_GLYPH))
+        pairs.append((codes[0], MISSING_GLYPH if found.group(2) else codes[1]))
+    if len(set(char for char, _source in pairs)) != len(pairs):
+        die("--aliases: a Unicode char is listed twice")
+    return pairs
+
+
+def build_ttf(font, widths, glyphs, chars_encoding, family, style, em, aliases=()):
+    """A TrueType file of one font of a .fon file, and how many chars it has. Each alias is
+    a Unicode char and whose glyph it is given: MISSING_GLYPH, or a char that the font has."""
     header = font["header"]
     height, ascent, first = header["dfPixHeight"], header["dfAscent"], header["dfFirstChar"]
     default = header["dfDefaultChar"]
@@ -2400,6 +2419,28 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em):
                 ord(char) not in cmap):
             cmap[ord(char)] = "uni%04X" % ord(char)
             bitmaps[cmap[ord(char)]] = rows
+    where = "--aliases for the font %r" % full_name(family, style)
+    # A char that the font has by its encoding gives way when its own glyph is blank, as a
+    # cell that nothing is drawn in is.
+    for char, _source in aliases:
+        if char in cmap:
+            if any(any(row) for row in bitmaps[cmap[char]]):
+                die("%s: U+%04X has a glyph of its own, which is not blank" % (where, char))
+            del bitmaps[cmap.pop(char)]
+    # A char given the very glyph of a missing char is taken for missing, so the first such
+    # alias gets a glyph of the same pixels, which the others share.
+    copy = None
+    for char, source in aliases:
+        if source == MISSING_GLYPH:
+            if copy is None:
+                copy = "uni%04X" % char if char <= 0xFFFF else "u%05X" % char
+                bitmaps[copy] = bitmaps[MISSING_GLYPH]
+            cmap[char] = copy
+        elif source in cmap:
+            cmap[char] = cmap[source]
+        else:
+            die("%s: U+%04X, to give its glyph to U+%04X, is not a char of the font"
+                % (where, source, char))
     plain = ["".join(char for char in text if char.isascii() and char.isalnum())
         for text in (family, style)]
     names = {1: family, 2: style, 3: "%s %s, TrueType" % (family, style),
@@ -2927,10 +2968,12 @@ def ttf_targets(source, fonts):
     return out
 
 
-def ttf_of_files(directory, em):
+def ttf_of_files(directory, em, aliases):
     """Make the TrueType font of the files that unpack wrote of one."""
-    if em is not None:
-        die("--em is not for %s: %s there tells the em" % (shown_directory(directory), TTF_JSON))
+    for option, given in (("em", em), ("aliases", aliases)):
+        if given is not None:
+            die("--%s is not for %s: %s there tells the %s"
+                % (option, shown_directory(directory), TTF_JSON, option))
     path = fon_path_of(directory)
     check_backup(path)
     data = build_ttf_from(directory)
@@ -2941,17 +2984,18 @@ def ttf_of_files(directory, em):
     return 0
 
 
-def ttf(target, name, rows, em):
+def ttf(target, name, rows, em, aliases):
     need_fonttools()
     if em is not None and em < 1:
         die("--em must be 1 or more pixels")
+    pairs = parse_aliases(aliases) if aliases is not None else []
     source = target
     if is_bitmaps(target):
         data = fon_of_bitmaps(target, name, rows)[0]
     elif rows is not None:
         die(ROWS_MISPLACED)
     elif os.path.isfile(os.path.join(target, TTF_JSON)):
-        return ttf_of_files(target.rstrip("/\\"), em)
+        return ttf_of_files(target.rstrip("/\\"), em, aliases)
     elif os.path.isdir(target):
         source = fon_path_of(target.rstrip("/\\"))
         data = build_from(target.rstrip("/\\"), lambda message: note("Warning: " + message),
@@ -2967,11 +3011,14 @@ def ttf(target, name, rows, em):
     targets = ttf_targets(source, fonts)
     for path, _family, _style in targets:
         check_backup(path)
-    for (font, widths, glyphs, _where), (path, family, style) in zip(fonts, targets):
+    built = []
+    for (font, widths, glyphs, _where), (_path, family, style) in zip(fonts, targets):
         header = font["header"]
         chars = encoding if name else CHARSET_ENCODINGS.get(header["dfCharSet"], encoding)
         size = em or header["dfPixHeight"]
-        made, count = build_ttf(font, widths, glyphs, chars, family, style, size)
+        built.append((header, chars, size) + build_ttf(font, widths, glyphs, chars, family,
+            style, size, pairs))
+    for (header, chars, size, made, count), (path, family, style) in zip(built, targets):
         back_up(path)
         with open(path, "wb") as handle:
             handle.write(made)
@@ -3283,7 +3330,7 @@ VERBS = (
         "the .fon file, the directory that unpack made of a .fon file or of a TrueType font,"
         " or the bitmaps of one fixed-pitch font",
         "the encoding of the chars and of the texts (default: for the chars, the one that"
-        " dfCharSet names)", ("rows", "em")),
+        " dfCharSet names)", ("rows", "em", "aliases")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
@@ -3294,6 +3341,9 @@ OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
     "em": "the height of the em in pixels (default: the height of the chars)",
+    "aliases": "more Unicode chars for the glyphs of the font, as 00A9=.notdef,U+00A3=0060:"
+        " each is a char, then what gives it the glyph: .notdef for the glyph of a missing"
+        " char, or another char of the font",
     "columns": "the pixel columns of a glyph to repeat or to leave out, counted from 0, as"
         " 0,3,7",
 }
@@ -3315,7 +3365,9 @@ def main():
     parser.add_argument("target", metavar=target, help=target_help)
     parser.add_argument("--encoding", metavar="NAME", help=encoding_help)
     for option in options:
-        if option != "columns":
+        if option == "aliases":
+            parser.add_argument("--" + option, metavar="LIST", help=OPTIONS[option])
+        elif option != "columns":
             parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
     args = parser.parse_args(argv[1:])
     if Image is None:
