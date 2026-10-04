@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Unpack a Windows .fon font file into editable files, pack them back, make a new one, or
-convert one to TrueType.
+"""Unpack a pixel font, a Windows .fon file or a TrueType font drawn of pixels, into editable
+files, make the font of them again, make a new one, or convert a .fon to TrueType.
 
-See fon.py --help.
+See pxfont --help.
 """
 # Written with the help of Claude Fable 5.1.
 
@@ -37,12 +37,12 @@ except ImportError:
 
 USAGE = """\
 Usage:
-fon unpack [--encoding NAME] FILE.fon|FILE.ttf
-fon pack [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
-fon create [--encoding NAME] FONT
-fon ttf [--encoding NAME] [--em N] [--rows N] FILE.fon|DIR.files|FONT.png|...
-fon expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
-fon bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont unpack [--encoding NAME] FILE.fon|FILE.ttf
+pxfont pack [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont create [--encoding NAME] FONT
+pxfont ttf [--encoding NAME] [--em N] [--rows N] FILE.fon|DIR.files|FONT.png|...
+pxfont expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 
 unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
   FILE.files/. It reports what is broken, and whether packing gives the same file back.
@@ -303,7 +303,7 @@ def die(message, code=2):
 
 
 def note(message):
-    sys.stderr.write("[fon] " + message + "\n")
+    sys.stderr.write("[pxfont] " + message + "\n")
 
 
 def exit_with(main):
@@ -2377,7 +2377,7 @@ def make_ttf(info, glyphs, cmap):
 
 def need_fonttools():
     if FontBuilder is None:
-        die("fon.py needs fontTools for TrueType fonts: python -m pip install fonttools")
+        die("pxfont needs fontTools for TrueType fonts: python -m pip install fonttools")
     # What fontTools remarks on in a font is not about what is done with it here.
     logging.getLogger("fontTools").setLevel(logging.ERROR)
 
@@ -3288,10 +3288,10 @@ def main():
         return None
     verbs = dict((verb[0], verb[1:]) for verb in VERBS)
     if argv[0] not in verbs:
-        die("no verb %r; run fon.py --help for the list" % argv[0])
+        die("no verb %r; run pxfont --help for the list" % argv[0])
     run, target, target_help, encoding_help, options = verbs[argv[0]]
-    parser = argparse.ArgumentParser(prog="fon.py " + argv[0],
-        epilog="fon.py --help describes the files.")
+    parser = argparse.ArgumentParser(prog="pxfont " + argv[0],
+        epilog="pxfont --help describes the files.")
     if "columns" in options:
         parser.add_argument("columns", metavar="COLUMNS", help=OPTIONS["columns"])
     parser.add_argument("target", metavar=target, help=target_help)
@@ -3301,7 +3301,7 @@ def main():
             parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
     args = parser.parse_args(argv[1:])
     if Image is None:
-        die("fon.py needs Pillow for the PNG files: python -m pip install pillow")
+        die("pxfont needs Pillow for the PNG files: python -m pip install pillow")
     # A name in another script must not stop a message on a console that lacks it.
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(errors="backslashreplace")

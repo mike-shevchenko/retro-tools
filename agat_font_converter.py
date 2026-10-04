@@ -10,7 +10,7 @@ Three modes:
   2. Text rendering to PNG:
          agat_font_converter.py "Agat-7 font.png" out.png --text "КИБЕР-МУЗЕЙ, МУРОМ"
 
-  3. Font sheet for fon.py, laid out as CP1251 (an output .png and no other flags):
+  3. Font sheet for pxfont.py, laid out as CP1251 (an output .png and no other flags):
          agat_font_converter.py "Agat-7 font main.png" "Agat 7x8px.png"
 
 The input is either chart: the full one of 256 labeled cells, or the main one of the
@@ -40,7 +40,7 @@ MAIN_SIZE = (241, 103)
 MAIN_ORIGIN = (1, 1)
 MAIN_ROWS = 6
 
-# The sheet for fon.py: the codes 0x20..0xFF, 32 to a row, on a checkerboard of papers.
+# The sheet for pxfont.py: the codes 0x20..0xFF, 32 to a row, on a checkerboard of papers.
 SHEET_COLS, SHEET_ROWS = 32, 7
 SHEET_FIRST_CODE = 0x20
 SHEET_PAPERS = ((255, 255, 255, 255), (192, 192, 192, 255))
@@ -181,7 +181,7 @@ def cp1251_glyphs(glyphs):
 
 
 def render_cp1251(glyphs):
-    """The font as a sheet for fon.py: the codes 0x20..0xFF of CP1251, 32 to a row.
+    """The font as a sheet for pxfont.py: the codes 0x20..0xFF of CP1251, 32 to a row.
 
     Each glyph is in a 7x8 cell whose paper is white or light gray, by turns
     along a row and down a column, and its ink is black. The cell of a code
