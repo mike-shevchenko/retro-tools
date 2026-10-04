@@ -2,13 +2,19 @@
 """
 Agat-7 font tool.
  
-Two modes:
+Three modes:
  
   1. C export (original behaviour):
          agat_font_converter.py "Agat-7 font.png" font.c
  
   2. Text rendering to PNG:
          agat_font_converter.py "Agat-7 font.png" out.png --text "КИБЕР-МУЗЕЙ, МУРОМ"
+
+  3. Font sheet for fon.py, laid out as CP1251 (an output .png and no other flags):
+         agat_font_converter.py "Agat-7 font main.png" "Agat 7x8px.png"
+
+The input is either chart: the full one of 256 labeled cells, or the main one of the
+96 glyphs 0x20..0x7F alone.
  
 Extra options for mode 2:
   --scale N      output pixels per font pixel (default 1)
@@ -27,6 +33,17 @@ CELL_W, CELL_H = 15, 17        # cell pitch in image pixels (2x2 pixels + grid l
 ORIGIN_X, ORIGIN_Y = 15, 17    # first glyph pixel, past the label row/column
 COLS, ROWS = 16, 16            # 256 cells; index == character code
 FIRST_CODE = 0
+
+# The main chart: the 96 glyphs 0x20..0x7F alone, in 6 rows with no labels.
+MAIN_SIZE = (241, 103)
+MAIN_ORIGIN = (1, 1)
+MAIN_ROWS = 6
+
+# The sheet for fon.py: the codes 0x20..0xFF, 32 to a row, on a checkerboard of papers.
+SHEET_COLS, SHEET_ROWS = 32, 7
+SHEET_FIRST_CODE = 0x20
+SHEET_PAPERS = ((255, 255, 255, 255), (192, 192, 192, 255))
+SHEET_INK = (0, 0, 0, 255)
  
  
 # КОИ-7 Н2: uppercase Cyrillic occupies 0x60..0x7F
@@ -53,17 +70,30 @@ def load_font(image_path):
     between them. Each cell is 14x16 px: a 7x8 glyph drawn at 2x scale,
     so every second pixel is sampled. The origin is (15, 17), past the
     yellow label row and column.
+
+    The main chart holds the codes 0x20..0x7F alone, in 6 rows from the
+    origin (1, 1). The other codes get the glyphs that the full chart
+    repeats for them: a code above 0x7F is as the code without its high
+    bit, and a code below 0x20 is as the code 0x20 above it.
     """
     img = Image.open(image_path).convert("L")
+    if (img.width, img.height) == MAIN_SIZE:
+        main = read_cells(img, MAIN_ORIGIN, MAIN_ROWS)
+        return [main[code & 0x7F if code & 0x7F < 0x20 else (code & 0x7F) - 0x20]
+            for code in range(256)]
     if (img.width, img.height) != (254, 288):
         print(f"Warning: expected 254x288, got {img.width}x{img.height}",
               file=sys.stderr)
- 
+    return read_cells(img, (ORIGIN_X, ORIGIN_Y), ROWS)
+
+
+def read_cells(img, origin, rows):
+    """Return the glyphs of the cells of a chart, row by row."""
     glyphs = []
-    for row in range(ROWS):
+    for row in range(rows):
         for col in range(COLS):
-            start_x = ORIGIN_X + col * CELL_W
-            start_y = ORIGIN_Y + row * CELL_H
+            start_x = origin[0] + col * CELL_W
+            start_y = origin[1] + row * CELL_H
             glyph = []
             for py in range(CHAR_H):
                 bits = []
@@ -138,8 +168,36 @@ def render_charmap(glyphs, scale=1, gap=0):
     if scale > 1:
         img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
     return img
- 
- 
+
+
+def cp1251_glyphs(glyphs):
+    """Map a CP1251 code to the glyph of the character that it stands for."""
+    m = {}
+    for code in range(0x20, 0x60):             # punctuation, digits, Latin: as they are
+        m[code] = glyphs[code]
+    for i, ch in enumerate(KOI7_CYRILLIC):     # Cyrillic to its CP1251 codes
+        m[ch.encode("cp1251")[0]] = glyphs[0x60 + i]
+    return m
+
+
+def render_cp1251(glyphs):
+    """The font as a sheet for fon.py: the codes 0x20..0xFF of CP1251, 32 to a row.
+
+    Each glyph is in a 7x8 cell whose paper is white or light gray, by turns
+    along a row and down a column, and its ink is black. The cell of a code
+    that has no Agat-7 glyph is left transparent.
+    """
+    img = Image.new("RGBA", (SHEET_COLS * CHAR_W, SHEET_ROWS * CHAR_H), (0, 0, 0, 0))
+    for code, glyph in cp1251_glyphs(glyphs).items():
+        row, col = divmod(code - SHEET_FIRST_CODE, SHEET_COLS)
+        paper = SHEET_PAPERS[(row + col) % 2]
+        for y in range(CHAR_H):
+            for x in range(CHAR_W):
+                img.putpixel((col * CHAR_W + x, row * CHAR_H + y),
+                    SHEET_INK if glyph[y][x] else paper)
+    return img
+
+
 def main():
     ap = argparse.ArgumentParser(description="Agat-7 font converter / text renderer")
     ap.add_argument("input_image")
@@ -166,6 +224,10 @@ def main():
                      args.margin, args.invert)
         img.save(args.output)
         print(f"Text written to {args.output} ({img.width}x{img.height})")
+    elif args.output.lower().endswith(".png"):
+        img = render_cp1251(glyphs)
+        img.save(args.output)
+        print(f"CP1251 sheet written to {args.output} ({img.width}x{img.height})")
     else:
         write_c(glyphs, args.output)
  
