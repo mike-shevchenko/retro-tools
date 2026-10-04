@@ -110,6 +110,11 @@ CODE_PREFIX = "U+"
 BLANK_FIRST_CHARS = (0, 32, CODE_PREFIX + "0000", CODE_PREFIX + "0020")
 # How many times larger than a pixel of the bitmaps the SVG picture of them shows it.
 SVG_SCALE = 8
+# What the SVG picture shows for a char that has no shape: the usual short names of the
+# control chars 0..31, and of a few more.
+CHAR_NAMES = dict(enumerate(("NUL SOH STX ETX EOT ENQ ACK BEL BS HT LF VT FF CR SO SI DLE DC1"
+    " DC2 DC3 DC4 NAK SYN ETB CAN EM SUB ESC FS GS RS US").split()))
+CHAR_NAMES.update({0x7F: "DEL", 0xA0: "NBSP", 0xAD: "SHY"})
 PAPER_DISTANCE = 64
 INK_DISTANCE = 120
 INK, PAPER, CHAR_SEPARATOR, ROW_SEPARATOR = "X", ".", "|", "-"
@@ -703,7 +708,8 @@ def write_png(path, sheet, cells, height, gap, bare=None):
 def write_svg(path, sheet, cells, height, gap, legend, bare=None):
     """A picture of the sheet to lay under it in a graphics editor: the same cells, and in
     each the glyph at half its size in a hairline frame, the char that it stands for beside
-    it, and its code below. The legend gives the char, or None, and the code of a key."""
+    it, or the short name of one that has no shape, and its code below. The legend gives
+    the char, or None, and the code of a key."""
     boxes = list(sheet_boxes(sheet, cells, gap))
     size = (max(left + width for _key, _r, left, width, _turn in boxes), len(sheet) * height)
 
@@ -731,7 +737,15 @@ def write_svg(path, sheet, cells, height, gap, legend, bare=None):
                         top + inset + y / 2, (end - x) / 2, (end - x) / 2))
                 x = end + 1
         char, code = legend(key)
-        if char is not None and unicodedata.category(char)[0] not in "CZ":
+        name = CHAR_NAMES.get(ord(char)) if char is not None else None
+        if name:
+            # A name takes the half of the cell beside the glyph, however long it is.
+            room = width * 0.44
+            letters = min(height * 0.42, room / (len(name) * 0.7))
+            chars.append('<text x="%g" y="%g" font-size="%g" textLength="%g"'
+                ' lengthAdjust="spacingAndGlyphs">%s</text>' % (left + width * 0.75,
+                top + inset + height / 4 + letters * 0.36, letters, room, name))
+        elif char is not None and unicodedata.category(char)[0] not in "CZ":
             chars.append('<text x="%g" y="%g" font-size="%g">%s</text>' % (left + width * 0.75,
                 top + height * 0.42, min(height * 0.42, width * 0.55), escaped(char)))
         # A code too long for its cell is set smaller, down to half the size, then squeezed.
