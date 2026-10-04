@@ -137,6 +137,10 @@ Packing bitmaps alone
   one row. The point size follows. Every other field is set as the fixed-pitch fonts
   shipped with Windows have it; to change one, unpack the result, edit fon.json and pack.
 
+  The char 127 is the default char of the font, as it is in those fonts: its glyph is
+  what is shown for a char that the font lacks, and ttf makes it the glyph of a missing
+  char in the TrueType font as well. A file that stops short of 127 has the space for it.
+
 Creating
 
   create writes what unpack would write for such a file whose font is blank: the chars
@@ -215,6 +219,10 @@ TrueType fonts of pixels
   modulo 32, and a row without a char is left out. With CP1251, a font of Cyrillic letters
   has them where a Windows font has them. The chars that the encoding lacks follow, 32 to
   a row, without gaps, in the order of their codes; the glyphs without a code are last.
+  The glyph of a missing char, .notdef, is in the place 127, where a .FON font has its
+  default char, unless a char is there: then it is with the glyphs without a code, and
+  unpack says so.
+
   --encoding NAME tells the encoding. Without it, it is the Windows code page that the
   font declares, when it declares one alone; for any other font it is CP1251, as for the
   texts. ttf.json records it as encoding.
@@ -350,6 +358,8 @@ NEW_ROWS = 7
 # The letters whose top and bottom rows are those of every capital letter in any design.
 NEW_LETTERS = "EFHLTZ"
 NEW_DPI = 96
+# The char whose glyph is shown for a char that the font lacks, when the font has it.
+NEW_DEFAULT_CHAR = 127
 # The size of a char in the blank font that the create verb makes.
 BLANK_WIDTH = 8
 BLANK_HEIGHT = 8
@@ -359,6 +369,8 @@ BLANK_HEIGHT = 8
 PIXEL_UNITS = 64
 MAX_UNITS_PER_EM = 16384
 MAX_COORDINATE = 32767
+# The glyph that a TrueType font shows for a char that it lacks.
+MISSING_GLYPH = ".notdef"
 # The Windows code pages by the bits with which a TrueType font declares them.
 CODE_PAGES = ("cp1252", "cp1250", "cp1251", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257")
 # The encoding of the chars by dfCharSet, for the charsets that name one.
@@ -2119,6 +2131,7 @@ def new_model(face, file, width, height, codes, ascent, leading, bold, italic):
     header = dict(NEW_FONT, dfPoints=points, dfVertRes=NEW_DPI, dfHorizRes=NEW_DPI,
         dfAscent=ascent, dfInternalLeading=leading, dfPixWidth=width, dfPixHeight=height,
         dfAvgWidth=width, dfMaxWidth=width, dfFirstChar=codes[0], dfLastChar=codes[-1],
+        dfDefaultChar=NEW_DEFAULT_CHAR - codes[0] if codes[-1] >= NEW_DEFAULT_CHAR else 0,
         dfCharSet=NEW_CHARSETS.get(encoding, 1), dfWeight=700 if bold else 400,
         dfItalic=int(italic))
     strings = (("CompanyName", ""), ("FileDescription", face + " font"),
@@ -2421,7 +2434,8 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em):
     height, ascent, first = header["dfPixHeight"], header["dfAscent"], header["dfFirstChar"]
     default = header["dfDefaultChar"]
     blank = [[0] * (header["dfAvgWidth"] or max(widths)) for _y in range(height)]
-    bitmaps = {".notdef": glyphs[default] if default < len(glyphs) and widths[default] else blank}
+    bitmaps = {MISSING_GLYPH: glyphs[default] if default < len(glyphs) and widths[default]
+        else blank}
     cmap = {}
     for code, rows, width in zip(range(first, first + len(glyphs)), glyphs, widths):
         try:
@@ -2520,20 +2534,24 @@ def declared_encoding(declared):
 def ttf_sheet(codes, names, chars_encoding):
     """The rows of the bitmaps of a TrueType font: the chars that the encoding has for the
     codes 0..255, each in the slot of that code modulo 32, without the rows of no char;
-    then the other chars, 32 to a row with no gaps; then the glyphs without a code."""
-    sheet, placed = [], {}
+    then the other chars, 32 to a row with no gaps; then the glyphs without a code. Of
+    these, the glyph of a missing char is in the slot of the default char of a font made
+    of bitmaps, when no char is there."""
+    sheet, placed, names = [], {}, list(names)
     for code, char in encoded_chars(chars_encoding).items():
         if char in codes:
-            placed[code] = char
+            placed[code] = code_key(char)
+    if MISSING_GLYPH in names and NEW_DEFAULT_CHAR not in placed:
+        names.remove(MISSING_GLYPH)
+        placed[NEW_DEFAULT_CHAR] = MISSING_GLYPH
     for base in range(0, 256, CHARS_PER_ROW):
-        row = [code_key(placed[code]) if code in placed else None
-            for code in range(base, base + CHARS_PER_ROW)]
+        row = [placed.get(code) for code in range(base, base + CHARS_PER_ROW)]
         while row and row[-1] is None:
             row.pop()
         if row:
             sheet.append(row)
-    others = sorted(set(codes) - set(placed.values()))
-    for keys in ([code_key(code) for code in others], list(names)):
+    others = [code_key(code) for code in sorted(codes)]
+    for keys in ([key for key in others if key not in placed.values()], names):
         sheet.extend(keys[at:at + CHARS_PER_ROW] for at in range(0, len(keys), CHARS_PER_ROW))
     return sheet
 
@@ -2740,6 +2758,9 @@ def parse_ttf(data, warn, where, chars_encoding=None):
         if key.startswith(CODE_PREFIX))
     glyphs = [name for name in order if name in rasters and name not in codes_of]
     chars_encoding = chars_encoding or declared_encoding(getattr(os2, "ulCodePageRange1", 0))
+    if MISSING_GLYPH in glyphs and encoded_chars(chars_encoding).get(NEW_DEFAULT_CHAR) in chars:
+        warn("%s: the place %d of the bitmaps holds a char, so the glyph of a missing char,"
+            " %s, is in their last row" % (where, NEW_DEFAULT_CHAR, MISSING_GLYPH))
     model = {
         "names": names,
         "units_per_pixel": unit,
@@ -2912,9 +2933,9 @@ def build_ttf_from(directory):
         return "uni%04X" % code if code <= 0xFFFF else "u%05X" % code
 
     codes = sorted(chars | zero)
-    glyphs = [(".notdef", cells.get(".notdef"))]
+    glyphs = [(MISSING_GLYPH, cells.get(MISSING_GLYPH))]
     glyphs += [(name_of(code), cells.get(code_key(code))) for code in codes]
-    glyphs += [(name, cells[name]) for name in extra if name != ".notdef"]
+    glyphs += [(name, cells[name]) for name in extra if name != MISSING_GLYPH]
     cmap = dict((code, name_of(code)) for code in codes)
     for code, target in shared.items():
         here = "aliases.%s" % code
