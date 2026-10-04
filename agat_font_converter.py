@@ -184,6 +184,7 @@ def cp1251_glyphs(glyphs):
         m[code] = glyphs[code]
     for i, ch in enumerate(KOI7_CYRILLIC):  # Cyrillic to its CP1251 codes
         m[ch.encode("cp1251")[0]] = glyphs[0x60 + i]
+    m[0xA4] = glyphs[0x24]  # the currency sign, which the font has for the dollar, as itself
     return m
 
 
