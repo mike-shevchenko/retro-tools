@@ -55,8 +55,6 @@ expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph
 bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
   half of each cell a pixel to the right. These five write a new file or directory.
 
-An existing target is renamed to .BAK first; when that name is taken too, the job fails.
-
 The files of a directory, for each font:
   fon.json or ttf.json: every field. One named _x is computed by pack, which ignores it.
   NAME.png: the bitmaps, 32 places to a row, a char at its code modulo 32. The papers are
@@ -83,7 +81,6 @@ TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the 
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
 
 --encoding NAME: the encoding of texts and chars, a Python codec; cp1251 unless recorded.
-Exit status: 0 success; 1 unpack found errors and wrote what it could; 2 nothing done.
 """
 
 JSON_NAME = "fon.json"
@@ -311,9 +308,13 @@ def note(message):
 
 def exit_with(main):
     """Run main, and report a Failure or an unreadable file in one line each. An empty line
-    ends the output of a run, to tell it from that of the next one."""
+    ends the output of a run, to tell it from that of the next one; the help, after which
+    main returns nothing, has none."""
+    ends = True
     try:
-        sys.exit(main())
+        code = main()
+        ends = code is not None
+        sys.exit(code or 0)
     except Failure as failure:
         note(str(failure))
         for problem in failure.problems:
@@ -330,7 +331,8 @@ def exit_with(main):
         sys.exit(130)
     finally:
         sys.stdout.flush()
-        sys.stderr.write("\n")
+        if ends:
+            sys.stderr.write("\n")
 
 
 def shown(path):
@@ -3283,7 +3285,7 @@ def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
         sys.stdout.write(USAGE)
-        return 0
+        return None
     verbs = dict((verb[0], verb[1:]) for verb in VERBS)
     if argv[0] not in verbs:
         die("no verb %r; run fon.py --help for the list" % argv[0])
