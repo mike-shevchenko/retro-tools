@@ -2212,6 +2212,12 @@ def fon_bitmaps(path, name, rows):
     target = os.path.splitext(path)[0] + ".fon"
     check_backup(target)
     data, what = fon_of_bitmaps(path, name, rows)
+    for font, widths, glyphs, _where in parse_fon(data, Report(quiet=True))[1]:
+        chars = CHARSET_ENCODINGS.get(font["header"]["dfCharSet"], encoding)
+        uncoded = uncoded_chars(font, widths, glyphs, chars)
+        if uncoded:
+            note("Warning: %s: the glyphs at %s are drawn, but have no char in %s, so no"
+                " text shows them" % (shown(path), uncoded, chars))
     back_up(target)
     with open(target, "wb") as handle:
         handle.write(data)
@@ -2383,6 +2389,23 @@ def need_fonttools():
     logging.getLogger("fontTools").setLevel(logging.ERROR)
 
 
+def uncoded_chars(font, widths, glyphs, chars_encoding):
+    """The chars of a font of a .fon file that have ink, and that no text has: those which
+    the encoding gives no Unicode char, or a control one. The default char is not among
+    them, as it is shown for a missing char. As hex codes for a message."""
+    header = font["header"]
+    first, found = header["dfFirstChar"], []
+    for code, rows, width in zip(range(first, first + len(glyphs)), glyphs, widths):
+        try:
+            char = bytes([code]).decode(chars_encoding)
+        except UnicodeError:
+            char = ""
+        if (len(char) != 1 or unicodedata.category(char) == "Cc") and width and any(
+                any(row) for row in rows) and code - first != header["dfDefaultChar"]:
+            found.append(code)
+    return hex_ranges(found, 2)
+
+
 def parse_aliases(text):
     """The pairs that --aliases lists: the code of a Unicode char, and whose glyph it is
     given: MISSING_GLYPH, or the code of a char that the font has."""
@@ -2463,7 +2486,7 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em, aliases=(
 # TrueType fonts of pixels
 
 
-def hex_ranges(codes):
+def hex_ranges(codes, digits=4):
     """Code points as ranges of hex numbers: "0020..007E, 00A0"."""
     runs = []
     for code in sorted(codes):
@@ -2471,8 +2494,8 @@ def hex_ranges(codes):
             runs[-1][1] = code
         else:
             runs.append([code, code])
-    return ", ".join("%04X" % low if low == high else "%04X..%04X" % (low, high)
-        for low, high in runs)
+    return ", ".join("%0*X" % (digits, low) if low == high
+        else "%0*X..%0*X" % (digits, low, digits, high) for low, high in runs)
 
 
 def parse_hex_ranges(value, where):
@@ -3018,6 +3041,10 @@ def ttf(target, name, rows, em, aliases):
         size = em or header["dfPixHeight"]
         built.append((header, chars, size) + build_ttf(font, widths, glyphs, chars, family,
             style, size, pairs))
+        uncoded = uncoded_chars(font, widths, glyphs, chars)
+        if uncoded:
+            note("Warning: the font %r: the glyphs at %s are drawn, but have no char in %s;"
+                " they are left out" % (full_name(family, style), uncoded, chars))
     for (header, chars, size, made, count), (path, family, style) in zip(built, targets):
         back_up(path)
         with open(path, "wb") as handle:
