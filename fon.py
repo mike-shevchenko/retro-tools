@@ -61,8 +61,8 @@ The files of a directory, for each font:
   fon.json or ttf.json: every field. One named _x is computed by pack, which ignores it.
   NAME.png: the bitmaps, 32 places to a row, a char at its code modulo 32. The papers are
     white and C0C0C0 by turns; the ink is 000080 on white and black on gray. A place of no
-    char, or of a zero-width char, is transparent.
-  NAME.txt: the same as text: X ink, `.` paper, `|` between chars, dashes between rows.
+    char or of a zero-width one is transparent, and so is the paper of the default char, 127.
+  NAME.txt: the same as text: X ink, `.` paper or a space for none, `|` and dashes between.
   NAME.svg: a picture to lay under the PNG, with the char and the code in each cell.
   pack takes the PNG or the text; when both are there they must agree: delete the old one.
 
@@ -115,6 +115,10 @@ SVG_SCALE = 8
 PAPER_DISTANCE = 64
 INK_DISTANCE = 120
 INK, PAPER, CHAR_SEPARATOR, ROW_SEPARATOR = "X", ".", "|", "-"
+# What a text file has for the paper of the cell that an image shows without paper, and
+# what a column of that cell is told by, where a column of a cell has its number.
+NO_PAPER = " "
+NO_CELL = -1
 
 RT_FONTDIR, RT_FONT, RT_VERSION = 0x8007, 0x8008, 0x8010
 RESOURCE_KINDS = (("fontdir", RT_FONTDIR), ("font", RT_FONT), ("version", RT_VERSION))
@@ -670,13 +674,22 @@ def sheet_boxes(sheet, cells, gap):
             left += width or gap
 
 
-def write_png(path, sheet, cells, height, gap):
+def bare_cell(cells, key, gap):
+    """The key of the cell that is shown without paper: that of the default char, at its
+    place, 127, when it is as wide as the chars usually are, which is what tells its width
+    to a reader. None when there is no such cell."""
+    return key if key in cells and gap and cells[key][0] == gap else None
+
+
+def write_png(path, sheet, cells, height, gap, bare=None):
     boxes = list(sheet_boxes(sheet, cells, gap))
     image = Image.new("RGBA", (max(left + width for _key, _r, left, width, _turn in boxes),
         len(sheet) * height), CLEAR)
     pixels = image.load()
     for key, r, left, width, turn in boxes:
         paper, ink = CELL_COLORS[turn]
+        if key == bare:
+            paper = CLEAR
         glyph = cells[key][1]
         for y in range(height):
             for x in range(width):
@@ -684,7 +697,7 @@ def write_png(path, sheet, cells, height, gap):
     image.save(path, "PNG")
 
 
-def write_svg(path, sheet, cells, height, gap, legend):
+def write_svg(path, sheet, cells, height, gap, legend, bare=None):
     """A picture of the sheet to lay under it in a graphics editor: the same cells, and in
     each the glyph at half its size in a hairline frame, the char that it stands for beside
     it, and its code below. The legend gives the char, or None, and the code of a key."""
@@ -699,8 +712,9 @@ def write_svg(path, sheet, cells, height, gap, legend):
     inset = height / 32
     for key, r, left, width, turn in boxes:
         top = r * height
-        papers.append('<rect x="%d" y="%d" width="%d" height="%d" fill="#%s"/>'
-            % (left, top, width, height, "C0C0C0" if turn else "FFFFFF"))
+        if key != bare:
+            papers.append('<rect x="%d" y="%d" width="%d" height="%d" fill="#%s"/>'
+                % (left, top, width, height, "C0C0C0" if turn else "FFFFFF"))
         frames.append('<rect x="%g" y="%g" width="%g" height="%g"/>'
             % (left + inset, top + inset, width / 2, height / 2))
         for y, row in enumerate(cells[key][1]):
@@ -745,28 +759,31 @@ def color_name(color):
 
 
 def column_cell(pixels, x, top, height, path):
-    """Which of the two cell colorings a column of a row of chars is painted in, or None
-    when all of it is transparent."""
-    found = None
+    """Which of the two cell colorings a column of a row of chars is painted in. None when
+    all of it is transparent, and NO_CELL when it is ink on transparent pixels, as a column
+    of the cell without paper is."""
+    found, papered = set(), False
     for y in range(top, top + height):
         color = pixels[x, y]
         if color in CELL_COLORS[0] or color in CELL_COLORS[1]:
-            cell = int(color in CELL_COLORS[1])
+            found.add(int(color in CELL_COLORS[1]))
+            papered = papered or color in (CELL_COLORS[0][0], CELL_COLORS[1][0])
         elif not color[3]:
-            cell = None
+            found.add(None)
         else:
             die("%s: the pixel at %d,%d is %s; it must be %s or %s for paper, %s or %s for"
                 " ink, or transparent" % (shown(path), x, y, color_name(color),
                 color_name(CELL_COLORS[0][0]), color_name(CELL_COLORS[1][0]),
                 color_name(CELL_COLORS[0][1]), color_name(CELL_COLORS[1][1])))
-        if y > top and cell != found:
+        if len(found - {None}) > 1 or (None in found and papered):
             die("%s: the pixels at %d,%d and above it are in different colorings; the image"
                 " has no colors but those that unpack paints with, and then a column of a"
                 " char must be all white with %s, all %s with %s, or all transparent"
                 % (shown(path), x, y, color_name(CELL_COLORS[0][1]),
                 color_name(CELL_COLORS[1][0]), color_name(CELL_COLORS[1][1])))
-        found = cell
-    return found
+    if found == {None}:
+        return None
+    return NO_CELL if None in found else found.pop()
 
 
 def full_coloring(opaque):
@@ -778,9 +795,10 @@ def full_coloring(opaque):
         blue in opaque or black not in opaque)
 
 
-def read_png(path, sheet, zero, height, plain):
+def read_png(path, sheet, zero, height, plain, bare=None, gap=None):
     """The widths and glyphs a PNG holds, in the order of the keys of the sheet. Without a
-    height given, the chars are as high as the image makes them."""
+    height given, the chars are as high as the image makes them. bare is the key of the
+    cell that may be without paper, and gap is how wide the chars usually are."""
     try:
         image = Image.open(path).convert("RGBA")
     except (OSError, ValueError) as error:
@@ -796,7 +814,7 @@ def read_png(path, sheet, zero, height, plain):
     # The full coloring shows by its colors alone. Any other image is a grid of equal cells.
     if full_coloring(set(color for _count, color
             in image.getcolors(image.size[0] * image.size[1]) if color[3])):
-        return read_png_cells(path, image, sheet, zero, height)
+        return read_png_cells(path, image, sheet, zero, height, bare, gap)
     width = plain_width(shown(path), image.size[0], max(len(row) for row in sheet), plain,
         "pixels", "the full coloring")
     if sheet[0][0] is not None and sheet[0][0] not in BLANK_FIRST_CHARS:
@@ -820,25 +838,31 @@ def plain_width(where, length, chars, plain, units, missing):
     return width
 
 
-def read_png_cells(path, image, sheet, zero, height):
+def read_png_cells(path, image, sheet, zero, height, bare, gap):
     """The widths and glyphs of a PNG in the full coloring. A char ends where the coloring
     changes, so the chars without pixels have to be told. Transparent columns are no
-    char's, wherever in a row they are."""
+    char's, wherever in a row they are. The cell that may be without paper is the last of
+    its row, and is read after the others, which tell how wide the chars usually are."""
     pixels = image.load()
-    widths, glyphs = [], []
+    widths, glyphs, later = [], [], None
     for r, row in enumerate(sheet):
-        top, x = r * height, 0
+        top, x, empty = r * height, 0, 0
         for slot, key in enumerate(row):
-            if key is None:
+            if key is None or key in zero:
+                empty += 1
+                if key is not None:
+                    widths.append(0)
+                    glyphs.append([[] for _y in range(height)])
                 continue
-            if key in zero:
+            turn = (r + slot) % 2
+            if key == bare and slot == len(row) - 1:
+                later = (len(widths), top, x, empty, turn)
                 widths.append(0)
-                glyphs.append([[] for _y in range(height)])
-                continue
+                glyphs.append(None)
+                break
             while x < image.size[0] and column_cell(pixels, x, top, height, path) is None:
                 x += 1
-            turn = (r + slot) % 2
-            start, (paper, ink) = x, CELL_COLORS[turn]
+            start, (paper, ink), empty = x, CELL_COLORS[turn], 0
             while x < image.size[0] and column_cell(pixels, x, top, height, path) == turn:
                 x += 1
             if x == start:
@@ -852,11 +876,63 @@ def read_png_cells(path, image, sheet, zero, height):
             widths.append(x - start)
             glyphs.append([[int(pixels[at, top + y] == ink) for at in range(start, x)]
                 for y in range(height)])
-        for at in range(x, image.size[0]):
-            if column_cell(pixels, at, top, height, path) is not None:
-                die("%s: row %d of chars has pixels at %d,%d, past its last char; the row has"
-                    " more chars than the font has for it" % (shown(path), r + 1, at, top))
+        else:
+            row_ends(path, image, top, height, x)
+    if later:
+        at, top, x, empty, turn = later
+        usual = collections.Counter(width for width in widths if width).most_common(1)
+        widths[at], glyphs[at] = read_last_cell(path, image, top, height, x, turn, bare,
+            empty, gap or (usual[0][0] if usual else 0))
     return widths, glyphs
+
+
+def row_ends(path, image, top, height, x):
+    """Refuse pixels in a row of chars past its last char."""
+    pixels = image.load()
+    for at in range(x, image.size[0]):
+        if any(pixels[at, top + y][3] for y in range(height)):
+            die("%s: the row of chars at %d has pixels at %d,%d, past its last char; the row"
+                " has more chars than the font has for it" % (shown(path), top, at, top))
+
+
+def read_last_cell(path, image, top, height, x, turn, key, empty, gap):
+    """The width and the glyph of the last cell of a row, which may be without paper. With
+    paper, it is read as any cell is. With ink alone on transparent pixels, it is as wide as
+    the chars usually are, at the place that the cell before it and the empty slots between
+    the two leave it."""
+    pixels = image.load()
+    paper, ink = CELL_COLORS[turn]
+
+    def clear(at):
+        return not any(pixels[at, top + y][3] for y in range(height))
+
+    start = x
+    while start < image.size[0] and clear(start):
+        start += 1
+    end = start
+    while end < image.size[0] and not clear(end):
+        end += 1
+    if any(pixels[at, top + y] == paper for at in range(start, end) for y in range(height)):
+        end = start
+        while end < image.size[0] and column_cell(pixels, end, top, height, path) == turn:
+            end += 1
+        row_ends(path, image, top, height, end)
+        return end - start, [[int(pixels[at, top + y] == ink) for at in range(start, end)]
+            for y in range(height)]
+    left = x + empty * gap
+    if start < end and not (gap and left <= start and end <= left + gap):
+        die("%s: the cell of %s, which is without paper, has ink at the pixels %d..%d of the"
+            " row at %d; without paper it is %d pixels wide, as the chars usually are, from"
+            " the pixel %d on" % (shown(path), key_label(key), start, end - 1, top, gap, left))
+    for at in range(start, end):
+        for y in range(height):
+            if pixels[at, top + y][3] and pixels[at, top + y] != ink:
+                die("%s: the pixel at %d,%d is %s; the cell of %s, which is without paper,"
+                    " has %s for ink, and is transparent otherwise" % (shown(path), at,
+                    top + y, color_name(pixels[at, top + y]), key_label(key), color_name(ink)))
+    row_ends(path, image, top, height, end)
+    return gap, [[int(at < image.size[0] and pixels[at, top + y] == ink)
+        for at in range(left, left + gap)] for y in range(height)]
 
 
 def color_distance(color, paper):
@@ -916,10 +992,11 @@ def read_png_grid(path, image, sheet, width, height):
     return [width] * len(glyphs), glyphs
 
 
-def text_lines(sheet, cells, height):
+def text_lines(sheet, cells, height, bare=None):
     lines, before = [], None
     for row in sheet:
-        body = [CHAR_SEPARATOR.join("" if key is None else "".join(INK if bit else PAPER
+        body = [CHAR_SEPARATOR.join("" if key is None else "".join(
+            INK if bit else NO_PAPER if key == bare else PAPER
             for bit in cells[key][1][y]) for key in row) for y in range(height)]
         if before is not None:
             lines.append(ROW_SEPARATOR * max(before, len(body[0])))
@@ -928,11 +1005,13 @@ def text_lines(sheet, cells, height):
     return lines
 
 
-def read_text(path, sheet, _zero, height, plain):
+def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
     """The widths and glyphs a text file holds, in the order of the keys of the sheet. The
     lines of dashes between the rows of chars may be left out, and so may the separators of
     chars when all chars are equally wide. Without a height given, the chars are as high as
-    the file makes them."""
+    the file makes them. bare is the key of the cell that may have spaces for its paper,
+    the last of its row: where the spaces that end a line are lost, they are put back up to
+    the gap, which is how wide the chars usually are."""
     with open(path, encoding="ascii", errors="replace") as handle:
         lines = handle.read().splitlines()
     dashes = [at for at, line in enumerate(lines) if line and not line.strip(ROW_SEPARATOR)]
@@ -956,7 +1035,7 @@ def read_text(path, sheet, _zero, height, plain):
         tops = [r * height for r in range(len(sheet))]
     barred = any(CHAR_SEPARATOR in line for line in lines)
     width = None
-    widths, glyphs = [], []
+    widths, glyphs, later = [], [], None
     for row, top in zip(sheet, tops):
         cells = [[] for _key in row]
         for y in range(height):
@@ -968,17 +1047,25 @@ def read_text(path, sheet, _zero, height, plain):
                 if width is None:
                     width = plain_width(where, len(line), len(row), plain, "characters",
                         "the %s between chars" % CHAR_SEPARATOR)
+                if row[-1] == bare:
+                    line = line.ljust(len(row) * width)
                 if len(line) != len(row) * width:
                     die("%s: is %d characters wide, but %d chars %d wide take %d"
                         % (where, len(line), len(row), width, len(row) * width))
                 parts = [line[at:at + width] for at in range(0, len(line), width)]
             if len(parts) != len(row):
                 die("%s: has %d chars, not %d" % (where, len(parts), len(row)))
-            for key, part, cell in zip(row, parts, cells):
+            for slot, (key, part, cell) in enumerate(zip(row, parts, cells)):
                 if key is None:
                     if part.strip(PAPER):
                         die("%s: has %r in slot %d of the row, where the font has no char"
                             % (where, part, row.index(None, len(cell)) + 1))
+                    continue
+                if key == bare and slot == len(row) - 1:
+                    if part.strip(INK + PAPER + NO_PAPER):
+                        die("%s: %s must be made of %s and %s, or of %s and spaces, not %r"
+                            % (where, key_label(key), INK, PAPER, INK, part))
+                    cell.append(part)
                     continue
                 if part.strip(INK + PAPER):
                     die("%s: %s must be made of %s and %s, not %r"
@@ -987,19 +1074,35 @@ def read_text(path, sheet, _zero, height, plain):
                     die("%s: %s is %d wide here, but %d in the line above"
                         % (where, key_label(key), len(part), len(cell[0])))
                 cell.append([int(mark == INK) for mark in part])
-        for key, cell in zip(row, cells):
+        for slot, (key, cell) in enumerate(zip(row, cells)):
+            if key == bare and slot == len(row) - 1:
+                later = (len(widths), cell, "%s:%d" % (shown(path), top + 1))
             if key is not None:
                 widths.append(len(cell[0]))
                 glyphs.append(cell)
-    for at in dashes:
+    if later:
+        at, parts, where = later
+        usual = collections.Counter(width for index, width in enumerate(widths)
+            if width and index != at).most_common(1)
+        wide = max(len(part) for part in parts)
+        if not any(PAPER in part for part in parts):
+            wide = max(wide, gap or (usual[0][0] if usual else 0))
+        elif len(set(len(part) for part in parts)) > 1:
+            die("%s: %s is not equally wide in all its lines" % (where, key_label(bare)))
+        widths[at] = wide
+        glyphs[at] = [[int(mark == INK) for mark in part.ljust(wide)] for part in parts]
+    for index, at in enumerate(dashes):
         longer = max(len(lines[at - 1]), len(lines[at + 1]))
-        if len(lines[at]) != longer:
+        # Around the row of the cell without paper, the spaces that end a line may be lost.
+        loose = bare is not None and bare in sheet[index] + sheet[index + 1]
+        if len(lines[at]) != longer and not (loose and len(lines[at]) > longer):
             die("%s:%d: must be a line of %d dashes, as long as the longer of the rows of"
                 " chars around it" % (shown(path), at + 1, longer))
     return widths, glyphs
 
 
-def load_glyphs(directory, names, sheet, zero, height, plain, where, listed=None):
+def load_glyphs(directory, names, sheet, zero, height, plain, where, listed=None, bare=None,
+        gap=None):
     """The widths and bitmaps of a font from its PNG, its text file, or both when they
     agree, in the order of the keys of the sheet."""
     found = []
@@ -1010,7 +1113,7 @@ def load_glyphs(directory, names, sheet, zero, height, plain, where, listed=None
             die("%s: %r must be a file name without a directory, or null" % (where, name))
         path = os.path.join(directory, name)
         if os.path.exists(path):
-            found.append((path,) + reader(path, sheet, zero, height, plain))
+            found.append((path,) + reader(path, sheet, zero, height, plain, bare, gap))
     if not found:
         die("%s: none of its bitmap files is there: %s"
             % (where, ", ".join(name for name in names if name is not None) or "none named"))
@@ -1475,6 +1578,13 @@ def build_version(value, where, problems):
     return body
 
 
+def default_place(header):
+    """The char 127 when it is the default char of a font, as the fonts shipped with Windows
+    have it: the char whose cell may be without paper. None for any other font."""
+    return NEW_DEFAULT_CHAR if header["dfFirstChar"] + header["dfDefaultChar"] == (
+        NEW_DEFAULT_CHAR) <= header["dfLastChar"] else None
+
+
 def build_font(value, where, load, problems, warn):
     """A font resource from its fon.json object and its bitmap files."""
     fields = Fields(value, where)
@@ -1508,7 +1618,8 @@ def build_font(value, where, load, problems, warn):
     # The layout: header, character table, bitmaps in char order, absolute space, names.
     # A font of fixed pitch may have bitmaps that do not mark where a char ends.
     plain = False if header["dfPitchAndFamily"] & 1 else header["dfPixWidth"] or None
-    widths, glyphs = load(names, sheet, zero, height, plain, where)
+    widths, glyphs = load(names, sheet, zero, height, plain, where, None,
+        default_place(header), header["dfPixWidth"] or header["dfAvgWidth"])
     bitmaps = [glyph_bytes(glyph, width, height) for glyph, width in zip(glyphs, widths)]
     bitmaps.append(bytes((space_width + 7) // 8 * height))
     at = table_at + len(bitmaps) * struct.calcsize(entry)
@@ -1848,17 +1959,19 @@ def write_files(directory, data, report):
         height, first = header["dfPixHeight"], header["dfFirstChar"]
         sheet = fon_sheet(first, first + len(glyphs) - 1)
         cells = dict(zip(range(first, first + len(glyphs)), zip(widths, glyphs)))
+        bare = bare_cell(cells, default_place(header),
+            header["dfPixWidth"] or header["dfAvgWidth"])
         if font["png"]:
             gap = header["dfPixWidth"] or header["dfAvgWidth"] or max(widths)
             chars = CHARSET_ENCODINGS.get(header["dfCharSet"], encoding)
             path = os.path.join(directory, font["png"])
-            write_png(path, sheet, cells, height, gap)
+            write_png(path, sheet, cells, height, gap, bare)
             write_svg(os.path.splitext(path)[0] + ".svg", sheet, cells, height, gap,
                 lambda code, chars=chars: (bytes([code]).decode(chars, "ignore") or None,
-                "%02X" % code))
+                "%02X" % code), bare)
         with open(os.path.join(directory, font["txt"]), "w", encoding="ascii",
                 newline="\n") as handle:
-            handle.write("\n".join(text_lines(sheet, cells, height)) + "\n")
+            handle.write("\n".join(text_lines(sheet, cells, height, bare)) + "\n")
     with open(os.path.join(directory, JSON_NAME), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json_text(model) + "\n")
     return model, fonts
@@ -2059,7 +2172,8 @@ def lone_bitmaps(path, rows):
             % (shown(path), bitmaps_height(path), rows, named_height))
     codes = list(range(NEW_FIRST_CHAR, NEW_FIRST_CHAR + rows * CHARS_PER_ROW))
     try:
-        widths, glyphs = reader(path, fon_sheet(codes[0], codes[-1]), set(), None, None)
+        widths, glyphs = reader(path, fon_sheet(codes[0], codes[-1]), set(), None, None,
+            NEW_DEFAULT_CHAR if codes[-1] >= NEW_DEFAULT_CHAR else None)
     except Failure as failure:
         die("%s; without %s, the bitmaps are %d row(s) of %d chars: %s"
             % (failure, JSON_NAME, rows, CHARS_PER_ROW, told))
@@ -2369,6 +2483,13 @@ def declared_encoding(declared):
     return pages[0] if len(pages) == 1 else DEFAULT_ENCODING
 
 
+def missing_place(codes, names, chars_encoding):
+    """Whether the glyph of a missing char is in the place of the default char in the
+    bitmaps of a TrueType font: it is when the font has the glyph and no char there."""
+    return MISSING_GLYPH in names and (
+        encoded_chars(chars_encoding).get(NEW_DEFAULT_CHAR) not in codes)
+
+
 def ttf_sheet(codes, names, chars_encoding):
     """The rows of the bitmaps of a TrueType font: the chars that the encoding has for the
     codes 0..255, each in the slot of that code modulo 32, without the rows of no char;
@@ -2637,15 +2758,18 @@ def write_ttf_files(directory, model, sheet, cells, fallback):
     model["png"], model["txt"] = base + ".png", base + ".txt"
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
     gap = usual_width(cells)
+    bare = bare_cell(cells, MISSING_GLYPH if missing_place(
+        parse_hex_ranges(model["chars"], "chars"), model["glyphs"], model["encoding"])
+        else None, gap)
     back_up(directory)
     os.mkdir(directory)
-    write_png(os.path.join(directory, model["png"]), sheet, cells, height, gap)
+    write_png(os.path.join(directory, model["png"]), sheet, cells, height, gap, bare)
     write_svg(os.path.join(directory, base + ".svg"), sheet, cells, height, gap,
         lambda key: (chr(int(key[len(CODE_PREFIX):], 16)), key[len(CODE_PREFIX):])
-        if key.startswith(CODE_PREFIX) else (None, key))
+        if key.startswith(CODE_PREFIX) else (None, key), bare)
     with open(os.path.join(directory, model["txt"]), "w", encoding="ascii",
             newline="\n") as handle:
-        handle.write("\n".join(text_lines(sheet, cells, height)) + "\n")
+        handle.write("\n".join(text_lines(sheet, cells, height, bare)) + "\n")
     with open(os.path.join(directory, TTF_JSON), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json_text(model) + "\n")
 
@@ -2761,7 +2885,8 @@ def build_ttf_from(directory):
         die("%s: chars and glyphs name no glyph of pixels" % TTF_JSON)
     height = above + below
     _widths, bitmaps = load_glyphs(directory, files, sheet, set(), height, None, TTF_JSON,
-        lambda keys: ", ".join(sorted(keys)))
+        lambda keys: ", ".join(sorted(keys)),
+        MISSING_GLYPH if missing_place(chars, extra, chars_encoding) else None)
     cells = dict(zip(sheet_keys(sheet), bitmaps))
     if chars & zero:
         die("%s: %s are listed both in chars and in zero_width"
@@ -2967,7 +3092,8 @@ def alter_file(path, rows, change):
         cells = dict(zip(sheet_keys(sheet), ((new_width, glyph) for glyph in changed)))
         back_up(target)
         with open(target, "w", encoding="ascii", newline="\n") as handle:
-            handle.write("\n".join(text_lines(sheet, cells, height)) + "\n")
+            handle.write("\n".join(text_lines(sheet, cells, height,
+                bare_cell(cells, NEW_DEFAULT_CHAR, new_width))) + "\n")
     else:
         image = change.image(Image.open(path), width, height, glyphs)
         back_up(target)
@@ -2993,12 +3119,13 @@ def alter_fon(directory, name, change, warn):
             header = font["header"]
             stated = dict((key, as_int(header[key], where, 0xFFFF)) for key in (
                 "dfFirstChar", "dfLastChar", "dfPixHeight", "dfPixWidth", "dfAvgWidth",
-                "dfMaxWidth", "dfPitchAndFamily", "dfWeight", "dfItalic"))
+                "dfMaxWidth", "dfPitchAndFamily", "dfWeight", "dfItalic", "dfDefaultChar"))
             first, last = stated["dfFirstChar"], stated["dfLastChar"]
             widths, glyphs = load_glyphs(directory, (font["png"], font["txt"]),
                 fon_sheet(first, last), parse_ranges(font["zero_width"], where, first, last),
                 stated["dfPixHeight"], False if stated["dfPitchAndFamily"] & 1
-                else stated["dfPixWidth"] or None, where)
+                else stated["dfPixWidth"] or None, where, None, default_place(stated),
+                stated["dfPixWidth"] or stated["dfAvgWidth"])
             glyphs = [change.glyph(glyph) for glyph in glyphs]
             new_widths = [len(glyph[0]) for glyph in glyphs]
             old = size_suffix(stated, widths)
@@ -3019,8 +3146,7 @@ def alter_fon(directory, name, change, warn):
             elif change.italic:
                 header["dfItalic"] = 1
             changed[where] = (new_widths, glyphs)
-    data = build_fon(model, lambda _names, _sheet, _zero, _height, _plain, where: changed[where],
-        warn)
+    data = build_fon(model, lambda *font: changed[font[5]], warn)
     return data, sizes[0] if len(sizes) == 1 and not same else None
 
 
@@ -3034,7 +3160,8 @@ def alter_ttf(directory, change, warn):
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
     sheet = ttf_sheet(chars, model["glyphs"], model["encoding"])
     _widths, bitmaps = load_glyphs(directory, (model["png"], model["txt"]), sheet, set(),
-        height, None, TTF_JSON, lambda keys: ", ".join(sorted(keys)))
+        height, None, TTF_JSON, lambda keys: ", ".join(sorted(keys)),
+        MISSING_GLYPH if missing_place(chars, model["glyphs"], model["encoding"]) else None)
     keys = sheet_keys(sheet)
 
     def size_of(glyphs):
