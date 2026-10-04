@@ -45,6 +45,13 @@ SHEET_COLS, SHEET_ROWS = 32, 7
 SHEET_FIRST_CODE = 0x20
 SHEET_PAPERS = ((255, 255, 255, 255), (192, 192, 192, 255))
 SHEET_INK = (0, 0, 0, 255)
+# A code with no Agat-7 glyph gets a box, as high as a capital letter, so that a text shows
+# what the font lacks. These codes are blank: one that CP1251 leaves undefined, and NBSP.
+SHEET_BOX = [[int(y < 7 and 1 <= x <= 5 and (y in (0, 6) or x in (1, 5))) for x in range(7)]
+    for y in range(8)]
+SHEET_BLANK = (0x98, 0xA0)
+# The cell without paper: the box that pxfont.py takes for the glyph of a missing character.
+SHEET_NO_PAPER = 0x7F
 
 
 # КОИ-7 Н2: uppercase Cyrillic occupies 0x60..0x7F
@@ -184,13 +191,16 @@ def render_cp1251(glyphs):
     """The font as a sheet for pxfont.py: the codes 0x20..0xFF of CP1251, 32 to a row.
 
     Each glyph is in a 7x8 cell whose paper is white or light gray, by turns
-    along a row and down a column, and its ink is black. The cell of a code
-    that has no Agat-7 glyph is left transparent.
+    along a row and down a column, and its ink is black. A code that has no
+    Agat-7 glyph gets a box, or is blank; the cell of 0x7F has no paper.
     """
     img = Image.new("RGBA", (SHEET_COLS * CHAR_W, SHEET_ROWS * CHAR_H), (0, 0, 0, 0))
-    for code, glyph in cp1251_glyphs(glyphs).items():
+    known = cp1251_glyphs(glyphs)
+    blank = [[0] * CHAR_W for _ in range(CHAR_H)]
+    for code in range(SHEET_FIRST_CODE, SHEET_FIRST_CODE + SHEET_COLS * SHEET_ROWS):
+        glyph = blank if code in SHEET_BLANK else known.get(code, SHEET_BOX)
         row, col = divmod(code - SHEET_FIRST_CODE, SHEET_COLS)
-        paper = SHEET_PAPERS[(row + col) % 2]
+        paper = (0, 0, 0, 0) if code == SHEET_NO_PAPER else SHEET_PAPERS[(row + col) % 2]
         for y in range(CHAR_H):
             for x in range(CHAR_W):
                 img.putpixel((col * CHAR_W + x, row * CHAR_H + y),
