@@ -38,31 +38,31 @@ except ImportError:
 USAGE = """\
 Usage:
 pxfont unpack [--encoding NAME] FILE.fon|FILE.ttf
-pxfont pack [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont fon [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 pxfont create [--encoding NAME] FONT
 pxfont ttf [--encoding NAME] [--em N] [--rows N] FILE.fon|DIR.files|FONT.png|...
 pxfont expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
 pxfont bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 
 unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
-  FILE.files/. It reports what is broken, and whether packing gives the same file back.
-pack: make the font file of DIR.files/, which any inconsistency in the files stops; or make
-  FONT.fon, one fixed-pitch font of the chars from 32 on, of its bitmaps alone.
+  FILE.files/. It reports what is broken, and whether the files give the same font back.
+fon: make the .fon file of DIR.fon.files/, which any inconsistency in the files stops; or
+  make FONT.fon, one fixed-pitch font of the chars from 32 on, of its bitmaps alone.
 create: write FONT.fon.files/ of a blank font, 8x8 or of the size in the name: "zx 6x10px".
-ttf: make a TrueType file of every font, each pixel a square, exact at --em pixels to the em
-  (unless told, the height) and its multiples. Chars get Unicode by dfCharSet or --encoding.
+ttf: make the font of DIR.ttf.files/; or make a TrueType file of every font of a .fon, each
+  pixel a square, exact at --em pixels to the em (unless told, the height) and its multiples.
 expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph: "0,3,7".
 bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
   half of each cell a pixel to the right. These five write a new file or directory.
 
 The files of a directory, for each font:
-  fon.json or ttf.json: every field. One named _x is computed by pack, which ignores it.
+  fon.json or ttf.json: every field. One named _x is computed, and ignored when read.
   NAME.png: the bitmaps, 32 places to a row, a char at its code modulo 32. The papers are
     white and C0C0C0 by turns; the ink is 000080 on white and black on gray. A place of no
     char or of a zero-width one is transparent, and so is the paper of the default char, 127.
   NAME.txt: the same as text: X ink, `.` paper or a space for none, `|` and dashes between.
   NAME.svg: a picture to lay under the PNG, with the char and the code in each cell.
-  pack takes the PNG or the text; when both are there they must agree: delete the old one.
+  fon and ttf take the PNG or the text; when both are there they must agree: delete one.
 
 A fixed-pitch font may have plainer bitmaps: text without the `|` and the dashes, and a PNG
   or a Photoshop .psd in any colors. Its first cell, blank, tells the paper: a color within
@@ -80,7 +80,7 @@ TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the 
   reported, hinting and kerning dropped. The places 0..255 follow --encoding, or the one
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
 
---encoding NAME: the encoding of texts and chars, a Python codec; cp1251 unless recorded.
+--encoding NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
 """
 
 JSON_NAME = "fon.json"
@@ -2032,25 +2032,25 @@ def fon_path_of(directory):
     return directory[:-len(FILES_SUFFIX)]
 
 
-def pack(target, name, rows):
+def fon(target, name, rows):
     if is_bitmaps(target):
-        return pack_bitmaps(target, name, rows)
+        return fon_bitmaps(target, name, rows)
     if rows is not None:
         die(ROWS_MISPLACED)
     directory = target.rstrip("/\\")
     if not os.path.isdir(directory):
         die("%s is neither a directory that unpack made, nor a .png, a .psd or a .txt"
             % shown(directory))
+    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+        die("%s holds a TrueType font, which the verb ttf makes; a .fon is not made of one"
+            % shown_directory(directory))
     path = fon_path_of(directory)
     check_backup(path)
-    if os.path.isfile(os.path.join(directory, TTF_JSON)):
-        data = build_ttf_from(directory)
-    else:
-        data = build_from(directory, lambda message: note("Warning: " + message), name)
+    data = build_from(directory, lambda message: note("Warning: " + message), name)
     back_up(path)
     with open(path, "wb") as handle:
         handle.write(data)
-    print("Packed %s into %s." % (shown_directory(directory), shown(path)))
+    print("Made %s of %s." % (shown(path), shown_directory(directory)))
     return 0
 
 
@@ -2206,7 +2206,7 @@ def fon_of_bitmaps(path, name, rows):
         leading))
 
 
-def pack_bitmaps(path, name, rows):
+def fon_bitmaps(path, name, rows):
     """Make a file of one fixed-pitch font from its bitmaps alone."""
     target = os.path.splitext(path)[0] + ".fon"
     check_backup(target)
@@ -2214,7 +2214,7 @@ def pack_bitmaps(path, name, rows):
     back_up(target)
     with open(target, "wb") as handle:
         handle.write(data)
-    print("Packed %s into %s: %s." % (shown(path), shown(target), what))
+    print("Made %s of %s: %s." % (shown(target), shown(path), what))
     return 0
 
 
@@ -2243,7 +2243,7 @@ def create(name, encoding_name):
         lambda message: note("Warning: " + message))
     write_files(directory, data, Report())
     print("Created %s: the files of a blank font, the face %r, %s, chars %d..%d, %d points;"
-        " draw the chars, set the fields in %s, and pack makes %s of them."
+        " draw the chars, set the fields in %s, and fon makes %s of them."
         % (shown_directory(directory), family + FON_SUFFIX, STYLES[(bold, italic)], codes[0],
         codes[-1], points, JSON_NAME, shown(path)))
     return 0
@@ -2927,6 +2927,20 @@ def ttf_targets(source, fonts):
     return out
 
 
+def ttf_of_files(directory, em):
+    """Make the TrueType font of the files that unpack wrote of one."""
+    if em is not None:
+        die("--em is not for %s: %s there tells the em" % (shown_directory(directory), TTF_JSON))
+    path = fon_path_of(directory)
+    check_backup(path)
+    data = build_ttf_from(directory)
+    back_up(path)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    print("Made %s of %s." % (shown(path), shown_directory(directory)))
+    return 0
+
+
 def ttf(target, name, rows, em):
     need_fonttools()
     if em is not None and em < 1:
@@ -2936,6 +2950,8 @@ def ttf(target, name, rows, em):
         data = fon_of_bitmaps(target, name, rows)[0]
     elif rows is not None:
         die(ROWS_MISPLACED)
+    elif os.path.isfile(os.path.join(target, TTF_JSON)):
+        return ttf_of_files(target.rstrip("/\\"), em)
     elif os.path.isdir(target):
         source = fon_path_of(target.rstrip("/\\"))
         data = build_from(target.rstrip("/\\"), lambda message: note("Warning: " + message),
@@ -3255,15 +3271,17 @@ VERBS = (
         "the encoding of the texts in a .fon file (default: %s), or of the places 0..255 in"
         " the bitmaps of a TrueType font (default: the code page that the font declares,"
         " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ()),
-    ("pack", pack, "FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
-        "the directory that unpack made, or the bitmaps of one fixed-pitch font",
+    ("fon", fon, "FILE.fon%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+        "the directory that unpack made of a .fon file, or the bitmaps of one fixed-pitch"
+        " font",
         "the encoding to write the texts in (default: the one %s records, or %s without it)"
         % (JSON_NAME, DEFAULT_ENCODING), ("rows",)),
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
         "the encoding to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
-    ("ttf", ttf, "FILE.fon|FILE.fon%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
-        "the .fon file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
+    ("ttf", ttf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+        "the .fon file, the directory that unpack made of a .fon file or of a TrueType font,"
+        " or the bitmaps of one fixed-pitch font",
         "the encoding of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names)", ("rows", "em")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
