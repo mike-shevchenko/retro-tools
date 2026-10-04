@@ -81,7 +81,7 @@ TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the 
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
 
 --encoding NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
---aliases 00A9=.notdef,00A3=0060: ttf adds chars with the glyph of a missing or another char.
+--aliases 00A9=.notdef,00A3=0060,2191=005E: ttf adds chars that show .notdef or another char.
 """
 
 JSON_NAME = "fon.json"
@@ -3382,9 +3382,10 @@ OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
     "em": "the height of the em in pixels (default: the height of the chars)",
-    "aliases": "more Unicode chars for the glyphs of the font, as 00A9=.notdef,U+00A3=0060:"
-        " each is a char, then what gives it the glyph: .notdef for the glyph of a missing"
-        " char, or another char of the font",
+    "aliases": "more Unicode chars for the glyphs of the font, as"
+        " 00A9=.notdef,U+00A3=0060,2191=005E for the copyright sign, the pound and the up"
+        " arrow of ZX Spectrum: each is a char, then what gives it the glyph: .notdef for the"
+        " glyph of a missing char, or another char of the font",
     "columns": "the pixel columns of a glyph to repeat or to leave out, counted from 0, as"
         " 0,3,7",
 }
