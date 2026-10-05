@@ -37,12 +37,12 @@ except ImportError:
 
 USAGE = """\
 Usage:
-pxfont unpack [--encoding NAME] FILE.fon|FILE.ttf
-pxfont fon [--encoding NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt
-pxfont create [--encoding NAME] FONT
-pxfont ttf [--encoding NAME] [--em N] [--rows N] [--aliases LIST] [--unpack] FILE.fon|DIR.files|...
-pxfont expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
-pxfont bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont unpack [--codepage NAME] [--codepage-patches LIST] FILE.fon|FILE.ttf
+pxfont fon [--codepage NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont create [--codepage NAME] FONT
+pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N] [--rows N]
+    [--unpack] FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] DIR.files|FONT.png|...
 
 unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
   FILE.files/. It reports what is broken, and whether the files give the same font back.
@@ -77,10 +77,10 @@ Names: a font is named by its face, its size, "6x8px" or "13px" when the widths 
   so; a new width gives a new size, or "wide" or "narrow" when the name tells no size.
 
 TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the grid are
-  reported, hinting and kerning dropped. The places 0..255 follow --encoding, or the one
+  reported, hinting and kerning dropped. The places 0..255 follow --codepage, or the one
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
-
---encoding NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
+--codepage NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
+--codepage-patches 98=00A3: unpack and ttf take the place 98, which has no char, for U+00A3.
 --aliases 00A9=.notdef,00A3=0060,2191=005E: ttf adds chars that show .notdef or another char.
 --unpack: fon and ttf then unpack the font that they made, into FILE.files/, for a check.
 """
@@ -378,7 +378,8 @@ def set_encoding(name):
     try:
         encoding = codecs.lookup(name).name
     except (LookupError, TypeError):
-        die("there is no encoding named %r" % (name,))
+        die("there is no code page named %r; one is named as a Python codec is, as cp1251"
+            % (name,))
 
 
 def text_of(data):
@@ -402,7 +403,7 @@ def bytes_of(value, where):
     try:
         return value.encode(encoding)
     except UnicodeError:
-        die("%s: has a character that the encoding %s lacks" % (where, encoding))
+        die("%s: has a character that the code page %s lacks" % (where, encoding))
 
 
 def hex_of(data):
@@ -1455,7 +1456,7 @@ def parse_fon(data, report):
         layout.place(p, data[p:p + 1 + data[p]], "the resource name %r" % name)
         p += 1 + data[p]
 
-    model = {"encoding": encoding, COMPUTED_MARK + "size": len(data),
+    model = {"codepage": encoding, COMPUTED_MARK + "size": len(data),
         "mz_header": read_fields(MZ_HEADER, data, 0), "dos_stub": hex_of(data[MZ_SIZE:ne_at]),
         "ne_header": read_fields(NE_HEADER, data, ne_at), "resource_table": table}
     for key, at, limit, what in (
@@ -1714,7 +1715,7 @@ def build_fon(model, load, warn):
     collected, and reported together in one Failure."""
     problems = []
     top = Fields(model, JSON_NAME)
-    top.take("encoding")
+    top.take("codepage")
     stub = unhex(top.take("dos_stub"), "dos_stub")
     ne_at = MZ_SIZE + len(stub)
     mz_bytes, mz = pack_fields(MZ_HEADER, top.take("mz_header"), "mz_header",
@@ -1834,9 +1835,9 @@ def build_from(directory, warn, name=None):
             model = json.load(handle)
     except ValueError as error:
         die("%s is not valid JSON: %s" % (shown(path), error))
-    if not isinstance(model, dict) or "encoding" not in model:
-        die("%s: encoding is missing" % JSON_NAME)
-    set_encoding(name or model["encoding"])
+    if not isinstance(model, dict) or "codepage" not in model:
+        die("%s: codepage is missing" % JSON_NAME)
+    set_encoding(name or model["codepage"])
     return build_fon(model, functools.partial(load_glyphs, directory), warn)
 
 
@@ -1995,14 +1996,21 @@ def write_files(directory, data, report):
     return model, fonts
 
 
-def unpack(path, name):
+def unpack(path, name, patches):
+    return unpack_file(path, name, parse_patches(patches) if patches is not None else None)
+
+
+def unpack_file(path, name, patches=None):
+    """Unpack a font file. The patches of the code page are for a TrueType font."""
     set_encoding(name or DEFAULT_ENCODING)
     directory = path + FILES_SUFFIX
     check_backup(directory)
     with open(path, "rb") as handle:
         data = handle.read()
     if data[:4] in SFNT_MAGICS:
-        return unpack_ttf(path, data, encoding if name else None)
+        return unpack_ttf(path, data, encoding if name else None, patches)
+    if patches:
+        die("--codepage-patches is for a TrueType font, and %s is not one" % shown(path))
     report = Report()
     model, fonts = write_files(directory, data, report)
     print("Unpacked %s into %s: %d font(s)."
@@ -2124,7 +2132,7 @@ def new_model(face, file, width, height, codes, ascent, leading, bold, italic):
     entries_at = resident_at + 1 + len(module or "FONT") + 3
     resource = {"rnHandle": 0, "rnUsage": 0}
     return {
-        "encoding": encoding,
+        "codepage": encoding,
         "mz_header": NEW_MZ,
         "dos_stub": NEW_STUB,
         "ne_header": dict(NEW_NE, ne_segtab=NE_SIZE, ne_rsrctab=NE_SIZE,
@@ -2235,7 +2243,7 @@ def fon_bitmaps(path, name, rows, then_unpack):
         check_backup(target + FILES_SUFFIX)
     data, what = fon_of_bitmaps(path, name, rows)
     for font, widths, glyphs, _where in parse_fon(data, Report(quiet=True))[1]:
-        chars = CHARSET_ENCODINGS.get(font["header"]["dfCharSet"], encoding)
+        chars = CodePage(CHARSET_ENCODINGS.get(font["header"]["dfCharSet"], encoding))
         uncoded = uncoded_chars(font, widths, glyphs, chars)
         if uncoded:
             note("Warning: %s: the glyphs at %s are drawn, but have no char in %s, so no"
@@ -2244,7 +2252,7 @@ def fon_bitmaps(path, name, rows, then_unpack):
     with open(target, "wb") as handle:
         handle.write(data)
     print("Made %s of %s: %s." % (shown(target), shown(path), what))
-    return unpack(target, name) if then_unpack else 0
+    return unpack_file(target, name) if then_unpack else 0
 
 
 def create(name, encoding_name):
@@ -2330,7 +2338,7 @@ def make_ttf(info, glyphs, cmap):
     """A TrueType file. Of info, units is the font units of a pixel, and em, ascent, descent,
     line_gap, the underline and the average width are in pixels; below is how many rows
     of a bitmap lie below the baseline; names are texts by their ids in the name table;
-    encoding is the one by which the chars have their codes in the bitmaps.
+    page is the code page by which the chars have their codes in the bitmaps.
     glyphs lists (name, bitmap): the outline of a glyph is that of the pixels of its bitmap,
     and a glyph without a bitmap is empty, of no width. cmap gives the glyph names of the
     codes."""
@@ -2388,9 +2396,9 @@ def make_ttf(info, glyphs, cmap):
     os2.panose.bProportion = 9 if fixed else 0
     os2.recalcUnicodeRanges(builder.font)
     os2.recalcCodePageRanges(builder.font)
-    # The code page of the encoding is declared whatever chars of it the font has.
-    if info["encoding"] in CODE_PAGES:
-        os2.ulCodePageRange1 |= 1 << CODE_PAGES.index(info["encoding"])
+    # The code page is declared whatever chars of it the font has.
+    if info["page"].name in CODE_PAGES:
+        os2.ulCodePageRange1 |= 1 << CODE_PAGES.index(info["page"].name)
     builder.setupPost(isFixedPitch=int(fixed),
         underlinePosition=info["underline"][0] * units,
         underlineThickness=info["underline"][1] * units)
@@ -2411,19 +2419,103 @@ def need_fonttools():
     logging.getLogger("fontTools").setLevel(logging.ERROR)
 
 
-def uncoded_chars(font, widths, glyphs, chars_encoding):
+def is_control(point):
+    return unicodedata.category(chr(point)) == "Cc"
+
+
+class CodePage:
+    """The code page of the chars of a font: a Python codec of single bytes by its name, and
+    patches, each the code of a place that the codec has no char for, or a control one,
+    with the code point that the place stands for."""
+
+    def __init__(self, name, patches=None):
+        self.name, self.patches, self.points = name, dict(patches or {}), {}
+        for code in range(256):
+            try:
+                char = bytes([code]).decode(name)
+            except UnicodeError:
+                continue
+            if len(char) == 1:
+                self.points[code] = ord(char)
+        taken = dict((point, code) for code, point in self.points.items())
+        for code, point in sorted(self.patches.items()):
+            if code in self.points and not is_control(self.points[code]):
+                die("the code page patch %02X=%04X: the place has a char in %s, U+%04X; a patch"
+                    " is for a place that has none" % (code, point, name, self.points[code]))
+            if point in taken or is_control(point):
+                die("the code page patch %02X=%04X: U+%04X is %s" % (code, point, point,
+                    "a control char" if is_control(point) else "at the place %02X already"
+                    % taken[point]))
+            taken[point] = code
+        self.points.update(self.patches)
+
+    def __str__(self):
+        return self.name + (" with " + ", ".join("%02X=U+%04X" % patch
+            for patch in sorted(self.patches.items())) if self.patches else "")
+
+    def chars(self):
+        """The code points by the codes that have one, the control chars among them."""
+        return self.points
+
+    def char(self, code):
+        """The char that a text has for a code; None for a code without one."""
+        point = self.points.get(code)
+        return None if point is None or is_control(point) else chr(point)
+
+    def patches_json(self):
+        return dict(("%02X" % code, "%04X" % point) for code, point in self.patches.items())
+
+
+def parse_patches(text):
+    """The patches that --codepage-patches lists: the codes of places, each with the code
+    point of its char."""
+    patches = {}
+    for item in text.split(","):
+        found = re.fullmatch(r"\s*([0-9A-F]{2})\s*=\s*(?:U\+)?((?:[0-9A-F]{2}){2,3})\s*", item,
+            re.IGNORECASE)
+        if not found or int(found.group(2), 16) > 0x10FFFF or (
+                int(found.group(1), 16) in patches):
+            die("--codepage-patches: %r must be a place, of two hex digits, then = and its"
+                " char, of four or six with U+ or without, as 98=00A3; a place is listed once"
+                % item.strip())
+        patches[int(found.group(1), 16)] = int(found.group(2), 16)
+    return patches
+
+
+def json_page(name, patches):
+    """The code page that ttf.json records, by its name and its patches."""
+    try:
+        name = codecs.lookup(name).name
+    except (LookupError, TypeError):
+        die("codepage: there is no code page named %r" % (name,))
+    if not isinstance(patches, dict) or not all(isinstance(point, str)
+            and re.fullmatch("[0-9A-Fa-f]{2}=(?:[0-9A-Fa-f]{2}){2,3}", "%s=%s" % (code, point))
+            and int(point, 16) <= 0x10FFFF for code, point in patches.items()):
+        die("codepage_patches: must be an object of places, each two hex digits, with the"
+            " code points of their chars, each four or six")
+    return CodePage(name, dict((int(code, 16), int(point, 16))
+        for code, point in patches.items()))
+
+
+def page_of(model):
+    """The code page of the object of ttf.json."""
+    return json_page(model["codepage"], model["codepage_patches"])
+
+
+def glyph_name(point):
+    """The name of the glyph of a char."""
+    return "uni%04X" % point if point <= 0xFFFF else "u%05X" % point
+
+
+def uncoded_chars(font, widths, glyphs, page):
     """The chars of a font of a .fon file that have ink, and that no text has: those which
-    the encoding gives no Unicode char, or a control one. The default char is not among
+    the code page gives no Unicode char, or a control one. The default char is not among
     them, as it is shown for a missing char. As hex codes for a message."""
     header = font["header"]
     first, found = header["dfFirstChar"], []
     for code, rows, width in zip(range(first, first + len(glyphs)), glyphs, widths):
-        try:
-            char = bytes([code]).decode(chars_encoding)
-        except UnicodeError:
-            char = ""
-        if (len(char) != 1 or unicodedata.category(char) == "Cc") and width and any(
-                any(row) for row in rows) and code - first != header["dfDefaultChar"]:
+        if page.char(code) is None and width and any(any(row) for row in rows) and (
+                code - first != header["dfDefaultChar"]):
             found.append(code)
     return hex_ranges(found, 2)
 
@@ -2432,20 +2524,22 @@ def parse_aliases(text):
     """The pairs that --aliases lists: the code of a Unicode char, and whose glyph it is
     given: MISSING_GLYPH, or the code of a char that the font has."""
     pairs = []
+    point = r"(?:U\+)?((?:[0-9A-F]{2}){2,3})"
     for item in text.split(","):
-        found = re.fullmatch(r"\s*(?:U\+)?([0-9A-F]{4,6})\s*=\s*(?:(%s)|(?:U\+)?([0-9A-F]{4,6}))"
-            r"\s*" % re.escape(MISSING_GLYPH), item, re.IGNORECASE)
+        found = re.fullmatch(r"\s*%s\s*=\s*(?:(%s)|%s)\s*"
+            % (point, re.escape(MISSING_GLYPH), point), item, re.IGNORECASE)
         codes = [int(part, 16) for part in found.group(1, 3) if part] if found else [-1]
         if not 0 <= max(codes) <= 0x10FFFF:
-            die("--aliases: %r must be a Unicode char, as 00A9 or U+00A9, then = and what"
-                " gives it the glyph: %s or another char" % (item.strip(), MISSING_GLYPH))
+            die("--aliases: %r must be a Unicode char, of four or six hex digits with U+ or"
+                " without, as 00A9, then = and what gives it the glyph: %s or another char"
+                % (item.strip(), MISSING_GLYPH))
         pairs.append((codes[0], MISSING_GLYPH if found.group(2) else codes[1]))
     if len(set(char for char, _source in pairs)) != len(pairs):
         die("--aliases: a Unicode char is listed twice")
     return pairs
 
 
-def build_ttf(font, widths, glyphs, chars_encoding, family, style, em, aliases=()):
+def build_ttf(font, widths, glyphs, page, family, style, em, aliases=()):
     """A TrueType file of one font of a .fon file, and how many chars it has. Each alias is
     a Unicode char and whose glyph it is given: MISSING_GLYPH, or a char that the font has."""
     header = font["header"]
@@ -2456,13 +2550,9 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em, aliases=(
         else blank}
     cmap = {}
     for code, rows, width in zip(range(first, first + len(glyphs)), glyphs, widths):
-        try:
-            char = bytes([code]).decode(chars_encoding)
-        except UnicodeError:
-            continue
-        if width and len(char) == 1 and unicodedata.category(char) != "Cc" and (
-                ord(char) not in cmap):
-            cmap[ord(char)] = "uni%04X" % ord(char)
+        char = page.char(code)
+        if width and char is not None and ord(char) not in cmap:
+            cmap[ord(char)] = glyph_name(ord(char))
             bitmaps[cmap[ord(char)]] = rows
     where = "--aliases for the font %r" % full_name(family, style)
     # A char that the font has by its encoding gives way when its own glyph is blank, as a
@@ -2478,7 +2568,7 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em, aliases=(
     for char, source in aliases:
         if source == MISSING_GLYPH:
             if copy is None:
-                copy = "uni%04X" % char if char <= 0xFFFF else "u%05X" % char
+                copy = glyph_name(char)
                 bitmaps[copy] = bitmaps[MISSING_GLYPH]
             cmap[char] = copy
         elif source in cmap:
@@ -2500,7 +2590,7 @@ def build_ttf(font, widths, glyphs, chars_encoding, family, style, em, aliases=(
         "line_gap": header["dfExternalLeading"], "underline": (-1, 1),
         "weight": min(max(header["dfWeight"], 1), 1000) if header["dfWeight"] else 400,
         "bold": style.startswith("Bold"), "italic": style.endswith("Italic"),
-        "average": header["dfAvgWidth"], "encoding": chars_encoding}
+        "average": header["dfAvgWidth"], "page": page}
     return make_ttf(info, list(bitmaps.items()), cmap), len(cmap)
 
 
@@ -2549,19 +2639,6 @@ def keys_text(keys):
         "glyphs " + ", ".join(names) if names else "") if text)
 
 
-def encoded_chars(chars_encoding):
-    """The chars of an encoding of single bytes, by their codes."""
-    chars = {}
-    for code in range(256):
-        try:
-            char = bytes([code]).decode(chars_encoding)
-        except UnicodeError:
-            continue
-        if len(char) == 1:
-            chars[code] = ord(char)
-    return chars
-
-
 def declared_encoding(declared):
     """The encoding of the places 0..255 for a font that is unpacked without one told: the
     Windows code page that the font declares by the bits given, when it declares one
@@ -2571,21 +2648,21 @@ def declared_encoding(declared):
     return pages[0] if len(pages) == 1 else DEFAULT_ENCODING
 
 
-def missing_place(codes, names, chars_encoding):
+def missing_place(codes, names, page):
     """Whether the glyph of a missing char is in the place of the default char in the
     bitmaps of a TrueType font: it is when the font has the glyph and no char there."""
     return MISSING_GLYPH in names and (
-        encoded_chars(chars_encoding).get(NEW_DEFAULT_CHAR) not in codes)
+        page.chars().get(NEW_DEFAULT_CHAR) not in codes)
 
 
-def ttf_sheet(codes, names, chars_encoding):
-    """The rows of the bitmaps of a TrueType font: the chars that the encoding has for the
+def ttf_sheet(codes, names, page):
+    """The rows of the bitmaps of a TrueType font: the chars that the code page has for the
     codes 0..255, each in the slot of that code modulo 32, without the rows of no char;
     then the other chars, 32 to a row with no gaps; then the glyphs without a code. Of
     these, the glyph of a missing char is in the slot of the default char of a font made
     of bitmaps, when no char is there."""
     sheet, placed, names = [], {}, list(names)
-    for code, char in encoded_chars(chars_encoding).items():
+    for code, char in page.chars().items():
         if char in codes:
             placed[code] = code_key(char)
     if MISSING_GLYPH in names and NEW_DEFAULT_CHAR not in placed:
@@ -2700,10 +2777,10 @@ def grid_fit(contours, advance, unit):
     return int(any(value % unit for value in values))
 
 
-def parse_ttf(data, warn, where, chars_encoding=None):
+def parse_ttf(data, warn, where, chars_encoding=None, patches=None):
     """A TrueType font of pixels as the object that ttf.json stores, the sheet of its
-    bitmaps, and their cells by the keys of the sheet. The encoding is that of the places
-    0..255 of the sheet; without one given, the font tells it."""
+    bitmaps, and their cells by the keys of the sheet. The code page, with its patches, is
+    that of the places 0..255 of the sheet; without one given, the font tells it."""
     need_fonttools()
     if data[:4] == SFNT_MAGICS[-1]:
         die("%s is a collection of fonts, which is not supported" % where)
@@ -2804,8 +2881,9 @@ def parse_ttf(data, warn, where, chars_encoding=None):
     chars = sorted(int(key[len(CODE_PREFIX):], 16) for key in rasters
         if key.startswith(CODE_PREFIX))
     glyphs = [name for name in order if name in rasters and name not in codes_of]
-    chars_encoding = chars_encoding or declared_encoding(getattr(os2, "ulCodePageRange1", 0))
-    if MISSING_GLYPH in glyphs and encoded_chars(chars_encoding).get(NEW_DEFAULT_CHAR) in chars:
+    page = CodePage(chars_encoding or declared_encoding(getattr(os2, "ulCodePageRange1", 0)),
+        patches)
+    if MISSING_GLYPH in glyphs and page.chars().get(NEW_DEFAULT_CHAR) in chars:
         warn("%s: the place %d of the bitmaps holds a char, so the glyph of a missing char,"
             " %s, is in their last row" % (where, NEW_DEFAULT_CHAR, MISSING_GLYPH))
     model = {
@@ -2824,13 +2902,14 @@ def parse_ttf(data, warn, where, chars_encoding=None):
         "underline_thickness": max(round(post.underlineThickness / unit), 1),
         "png": None,
         "txt": None,
-        "encoding": chars_encoding,
+        "codepage": page.name,
+        "codepage_patches": page.patches_json(),
         "chars": hex_ranges(chars),
         "zero_width": hex_ranges(zero),
         "aliases": aliases,
         "glyphs": glyphs,
     }
-    return model, ttf_sheet(set(chars), glyphs, chars_encoding), cells
+    return model, ttf_sheet(set(chars), glyphs, page), cells
 
 
 def usual_width(cells):
@@ -2847,7 +2926,7 @@ def write_ttf_files(directory, model, sheet, cells, fallback):
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
     gap = usual_width(cells)
     bare = bare_cell(cells, MISSING_GLYPH if missing_place(
-        parse_hex_ranges(model["chars"], "chars"), model["glyphs"], model["encoding"])
+        parse_hex_ranges(model["chars"], "chars"), model["glyphs"], page_of(model))
         else None, gap)
     back_up(directory)
     os.mkdir(directory)
@@ -2862,23 +2941,25 @@ def write_ttf_files(directory, model, sheet, cells, fallback):
         handle.write(json_text(model) + "\n")
 
 
-def unpack_ttf(path, data, chars_encoding):
+def unpack_ttf(path, data, chars_encoding, patches):
     directory = path + FILES_SUFFIX
     report = Report()
-    model, sheet, cells = parse_ttf(data, report.warning, shown(path), chars_encoding)
+    model, sheet, cells = parse_ttf(data, report.warning, shown(path), chars_encoding,
+        patches)
+    page = page_of(model)
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
     write_ttf_files(directory, model, sheet, cells,
         os.path.splitext(os.path.basename(path))[0])
     print("Unpacked %s into %s: %d glyph(s), with the chars of %s in the places 0..255; a"
         " pixel is %d font units, the em %d pixels, a cell %d pixels high."
-        % (shown(path), shown_directory(directory), len(cells), model["encoding"],
+        % (shown(path), shown_directory(directory), len(cells), page,
         model["units_per_pixel"], model["em"], height))
 
     # The files just written are packed in memory, and the result unpacked: that finds what
     # packing refuses, and whether the glyphs and the metrics come back.
     try:
         again, _sheet, cells_again = parse_ttf(build_ttf_from(directory),
-            lambda _message: None, "the font that packing makes", model["encoding"])
+            lambda _message: None, "the font that packing makes", page.name, page.patches)
         if dict(again, png=model["png"], txt=model["txt"]) != model or cells_again != cells:
             report.warning("packing these files gives a font of other glyphs or metrics: %s"
                 % (", ".join(key for key in model if key not in ("png", "txt")
@@ -2950,12 +3031,7 @@ def build_ttf_from(directory):
         underline=(whole_number(top, "underline_position", -4096, 4096),
         whole_number(top, "underline_thickness", 0, 4096)))
     files = (top.take("png"), top.take("txt"))
-    chars_encoding = top.take("encoding")
-    try:
-        chars_encoding = codecs.lookup(chars_encoding).name
-    except (LookupError, TypeError):
-        die("encoding: there is no encoding named %r" % (chars_encoding,))
-    info["encoding"] = chars_encoding
+    page = info["page"] = json_page(top.take("codepage"), top.take("codepage_patches"))
     chars = parse_hex_ranges(top.take("chars"), "chars")
     zero = parse_hex_ranges(top.take("zero_width"), "zero_width")
     extra = top.take_list("glyphs")
@@ -2968,33 +3044,30 @@ def build_ttf_from(directory):
             " shares")
     top.done()
 
-    sheet = ttf_sheet(chars, extra, chars_encoding)
+    sheet = ttf_sheet(chars, extra, page)
     if not sheet:
         die("%s: chars and glyphs name no glyph of pixels" % TTF_JSON)
     height = above + below
     _widths, bitmaps = load_glyphs(directory, files, sheet, set(), height, None, TTF_JSON,
         lambda keys: ", ".join(sorted(keys)),
-        MISSING_GLYPH if missing_place(chars, extra, chars_encoding) else None)
+        MISSING_GLYPH if missing_place(chars, extra, page) else None)
     cells = dict(zip(sheet_keys(sheet), bitmaps))
     if chars & zero:
         die("%s: %s are listed both in chars and in zero_width"
             % (TTF_JSON, hex_ranges(chars & zero)))
 
-    def name_of(code):
-        return "uni%04X" % code if code <= 0xFFFF else "u%05X" % code
-
     codes = sorted(chars | zero)
     glyphs = [(MISSING_GLYPH, cells.get(MISSING_GLYPH))]
-    glyphs += [(name_of(code), cells.get(code_key(code))) for code in codes]
+    glyphs += [(glyph_name(code), cells.get(code_key(code))) for code in codes]
     glyphs += [(name, cells[name]) for name in extra if name != MISSING_GLYPH]
-    cmap = dict((code, name_of(code)) for code in codes)
+    cmap = dict((code, glyph_name(code)) for code in codes)
     for code, target in shared.items():
         here = "aliases.%s" % code
         code = as_int("0x%s" % code, here, 0x10FFFF)
         target = as_int("0x%s" % target if isinstance(target, str) else target, here, 0x10FFFF)
         if code in cmap or target not in codes:
             die("%s: must be a code without a glyph of its own, for a code that has one" % here)
-        cmap[code] = name_of(target)
+        cmap[code] = glyph_name(target)
     return make_ttf(info, glyphs, cmap)
 
 
@@ -3013,14 +3086,14 @@ def ttf_targets(source, fonts):
     return out
 
 
-def ttf_of_files(directory, em, aliases, then_unpack):
+def ttf_of_files(directory, em, aliases, patches, then_unpack):
     """Make the TrueType font of the files that unpack wrote of one."""
     if then_unpack:
         die(UNPACK_MISPLACED % shown_directory(directory))
-    for option, given in (("em", em), ("aliases", aliases)):
+    for option, given in (("em", em), ("aliases", aliases), ("codepage-patches", patches)):
         if given is not None:
-            die("--%s is not for %s: %s there tells the %s"
-                % (option, shown_directory(directory), TTF_JSON, option))
+            die("--%s is not for %s: %s there tells it"
+                % (option, shown_directory(directory), TTF_JSON))
     path = fon_path_of(directory)
     check_backup(path)
     data = build_ttf_from(directory)
@@ -3031,18 +3104,19 @@ def ttf_of_files(directory, em, aliases, then_unpack):
     return 0
 
 
-def ttf(target, name, rows, em, aliases, then_unpack):
+def ttf(target, name, rows, em, aliases, patches, then_unpack):
     need_fonttools()
     if em is not None and em < 1:
         die("--em must be 1 or more pixels")
     pairs = parse_aliases(aliases) if aliases is not None else []
+    places = parse_patches(patches) if patches is not None else {}
     source = target
     if is_bitmaps(target):
         data = fon_of_bitmaps(target, name, rows)[0]
     elif rows is not None:
         die(ROWS_MISPLACED)
     elif os.path.isfile(os.path.join(target, TTF_JSON)):
-        return ttf_of_files(target.rstrip("/\\"), em, aliases, then_unpack)
+        return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack)
     elif os.path.isdir(target):
         source = fon_path_of(target.rstrip("/\\"))
         data = build_from(target.rstrip("/\\"), lambda message: note("Warning: " + message),
@@ -3063,7 +3137,8 @@ def ttf(target, name, rows, em, aliases, then_unpack):
     built = []
     for (font, widths, glyphs, _where), (_path, family, style) in zip(fonts, targets):
         header = font["header"]
-        chars = encoding if name else CHARSET_ENCODINGS.get(header["dfCharSet"], encoding)
+        chars = CodePage(encoding if name
+            else CHARSET_ENCODINGS.get(header["dfCharSet"], encoding), places)
         size = em or header["dfPixHeight"]
         built.append((header, chars, size) + build_ttf(font, widths, glyphs, chars, family,
             style, size, pairs))
@@ -3084,9 +3159,10 @@ def ttf(target, name, rows, em, aliases, then_unpack):
             % (shown(target), report.errors))
     statuses = [1 if report.errors else 0]
     if then_unpack:
-        # Each font is unpacked by the encoding that gave it its chars.
-        statuses += [unpack(path, chars) for (_header, chars, _size, _made, _count),
-            (path, _family, _style) in zip(built, targets)]
+        # Each font is unpacked by the code page that gave it its chars.
+        statuses += [unpack_file(path, chars.name, chars.patches)
+            for (_header, chars, _size, _made, _count), (path, _family, _style)
+            in zip(built, targets)]
     return max(statuses)
 
 
@@ -3281,10 +3357,10 @@ def alter_ttf(directory, change, warn):
         model = json.load(handle)
     chars = parse_hex_ranges(model["chars"], "chars")
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
-    sheet = ttf_sheet(chars, model["glyphs"], model["encoding"])
+    sheet = ttf_sheet(chars, model["glyphs"], page_of(model))
     _widths, bitmaps = load_glyphs(directory, (model["png"], model["txt"]), sheet, set(),
         height, None, TTF_JSON, lambda keys: ", ".join(sorted(keys)),
-        MISSING_GLYPH if missing_place(chars, model["glyphs"], model["encoding"]) else None)
+        MISSING_GLYPH if missing_place(chars, model["glyphs"], page_of(model)) else None)
     keys = sheet_keys(sheet)
 
     def size_of(glyphs):
@@ -3367,28 +3443,28 @@ def bold_italic(target, name, rows):
 
 ALTERED = ("FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
     "the directory that unpack made, or the bitmaps of one fixed-pitch font",
-    "the encoding of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
+    "the code page of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
 # A verb as its name, its function, its argument and the help for it, the help for
-# --encoding, and its other options: columns, which is an argument before the other one,
+# --codepage, and its other options: columns, which is an argument before the other one,
 # and numbers, all passed on in this order.
 VERBS = (
     ("unpack", unpack, "FILE.fon|FILE.ttf", "the .fon file or the TrueType font to unpack",
-        "the encoding of the texts in a .fon file (default: %s), or of the places 0..255 in"
+        "the code page of the texts in a .fon file (default: %s), or of the places 0..255 in"
         " the bitmaps of a TrueType font (default: the code page that the font declares,"
-        " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ()),
+        " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ("patches",)),
     ("fon", fon, "FILE.fon%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
         "the directory that unpack made of a .fon file, or the bitmaps of one fixed-pitch"
         " font",
-        "the encoding to write the texts in (default: the one %s records, or %s without it)"
+        "the code page to write the texts in (default: the one %s records, or %s without it)"
         % (JSON_NAME, DEFAULT_ENCODING), ("rows", "unpack")),
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
-        "the encoding to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
+        "the code page to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
     ("ttf", ttf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
         "the .fon file, the directory that unpack made of a .fon file or of a TrueType font,"
         " or the bitmaps of one fixed-pitch font",
-        "the encoding of the chars and of the texts (default: for the chars, the one that"
-        " dfCharSet names)", ("rows", "em", "aliases", "unpack")),
+        "the code page of the chars and of the texts (default: for the chars, the one that"
+        " dfCharSet names)", ("rows", "em", "aliases", "patches", "unpack")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
@@ -3399,6 +3475,8 @@ OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
     "em": "the height of the em in pixels (default: the height of the chars)",
+    "patches": "chars for the places that the code page has none for, or control ones: pairs"
+        " in hex of a place and the code point of its char, as 98=00A3,7F=U+2302",
     "unpack": "then unpack each font file that is made, into FILE%s, as the verb unpack"
         " does: to check what the font has" % FILES_SUFFIX,
     "aliases": "more Unicode chars for the glyphs of the font, as"
@@ -3424,10 +3502,13 @@ def main():
     if "columns" in options:
         parser.add_argument("columns", metavar="COLUMNS", help=OPTIONS["columns"])
     parser.add_argument("target", metavar=target, help=target_help)
-    parser.add_argument("--encoding", metavar="NAME", help=encoding_help)
+    parser.add_argument("--codepage", metavar="NAME", help=encoding_help)
     for option in options:
         if option == "aliases":
             parser.add_argument("--" + option, metavar="LIST", help=OPTIONS[option])
+        elif option == "patches":
+            parser.add_argument("--codepage-patches", dest=option, metavar="LIST",
+                help=OPTIONS[option])
         elif option == "unpack":
             parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
         elif option != "columns":
@@ -3438,7 +3519,7 @@ def main():
     # A name in another script must not stop a message on a console that lacks it.
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(errors="backslashreplace")
-    return run(args.target, args.encoding, *(getattr(args, option) for option in options))
+    return run(args.target, args.codepage, *(getattr(args, option) for option in options))
 
 
 if __name__ == "__main__":
