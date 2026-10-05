@@ -39,16 +39,16 @@ except ImportError:
 USAGE = """\
 Usage:
 pxfont unpack [--codepage NAME] [--codepage-patches LIST] FILE.fon|FILE.ttf
-pxfont fon [--codepage NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont fon [--codepage NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont create [--codepage NAME] FONT
 pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N] [--rows N]
-    [--unpack] FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt
+    [--unpack] FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 
 unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
   FILE.files/. It reports what is broken, and whether the files give the same font back.
 fon: make the .fon file of DIR.fon.files/, which any inconsistency in the files stops; or
-  make FONT.fon, one fixed-pitch font of the chars from 32 on, of its bitmaps alone.
+  make FONT.fon of FONT.fnt, or of bitmaps alone: one fixed-pitch font of the chars from 32 on.
 create: write FONT.fon.files/ of a blank font, 8x8 or of the size in the name: "zx 6x10px".
 ttf: make the font of DIR.ttf.files/; or make a TrueType file of every font of a .fon, each
   pixel a square, exact at --em pixels to the em (unless told, the height) and its multiples.
@@ -2132,8 +2132,49 @@ def fon_path_of(directory):
 UNPACK_MISPLACED = "--unpack is not for %s: it would be unpacked over the files it is made of"
 
 
+def is_fnt(target):
+    """Whether the argument is a .fnt file, which holds one font without a .fon around it."""
+    return os.path.splitext(target)[1].lower() == ".fnt" and not os.path.isdir(target)
+
+
+def fon_of_fnt(path, name):
+    """The .fon file of the one font of a .fnt file, and what the font is. The file gives
+    the font whole; what is around a font in a .fon is as a new font file has it."""
+    set_encoding(name or DEFAULT_ENCODING)
+    with open(path, "rb") as handle:
+        data = handle.read()
+    report = Report()
+    parsed = parse_font(data, 1, shown(path), report)
+    if parsed is None or report.errors:
+        die("%s is not a whole raster font of version 2 or 3" % shown(path))
+    font, widths, glyphs = parsed
+    header = font["header"]
+    stem = os.path.basename(os.path.splitext(path)[0])
+    face = font["face_name"]
+    if (face or "hex:").startswith("hex:"):
+        face = stem
+    first, last = header["dfFirstChar"], header["dfLastChar"]
+    model, _points = new_model(face, stem + ".fon", header["dfPixWidth"],
+        header["dfPixHeight"], [first, last], header["dfAscent"],
+        header["dfInternalLeading"], header["dfWeight"] > 500, bool(header["dfItalic"]))
+    kept = dict((key, item) for key, item in font.items() if key != "tail")
+    model["resource_table"]["types"][1]["resources"][0]["font"] = kept
+    model["nonresident_names"][0]["name"] = "FONTRES 100,%d,%d : %s %d" % (
+        header["dfHorizRes"], header["dfVertRes"], face, header["dfPoints"])
+    try:
+        made = build_fon(model, lambda *_font: (widths, glyphs),
+            lambda message: note("Warning: " + message))
+    except Failure as failure:
+        # The model is not of a file that the user has, so the font file is what is named.
+        raise Failure("%s does not make a font:" % shown(path), failure.code,
+            failure.problems or [str(failure)])
+    return made, ("the face %r, %s, chars %d..%d, %d points, %d pixels high"
+        % (font["face_name"], STYLES[(header["dfWeight"] > 500, bool(header["dfItalic"]))],
+        first, last, header["dfPoints"], header["dfPixHeight"]))
+
+
 def fon(target, name, rows, then_unpack):
-    if is_bitmaps(target):
+    if is_bitmaps(target) or is_fnt(target):
         return fon_bitmaps(target, name, rows, then_unpack)
     if rows is not None:
         die(ROWS_MISPLACED)
@@ -2309,12 +2350,15 @@ def fon_of_bitmaps(path, name, rows):
 
 
 def fon_bitmaps(path, name, rows, then_unpack):
-    """Make a file of one fixed-pitch font from its bitmaps alone, and unpack it if told."""
+    """Make a file of one font from its bitmaps alone or from its .fnt file, and unpack it
+    if told."""
     target = os.path.splitext(path)[0] + ".fon"
     check_backup(target)
     if then_unpack:
         check_backup(target + FILES_SUFFIX)
-    data, what = fon_of_bitmaps(path, name, rows)
+    if is_fnt(path) and rows is not None:
+        die(ROWS_MISPLACED)
+    data, what = fon_of_fnt(path, name) if is_fnt(path) else fon_of_bitmaps(path, name, rows)
     for font, widths, glyphs, _where in parse_fon(data, Report(quiet=True))[1]:
         chars = CodePage(CHARSET_ENCODINGS.get(font["header"]["dfCharSet"], encoding))
         uncoded = uncoded_chars(font, widths, glyphs, chars)
@@ -3198,6 +3242,8 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack):
         data = fon_of_bitmaps(target, name, rows)[0]
     elif rows is not None:
         die(ROWS_MISPLACED)
+    elif is_fnt(target):
+        data = fon_of_fnt(target, name)[0]
     elif os.path.isfile(os.path.join(target, TTF_JSON)):
         return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack)
     elif os.path.isdir(target):
@@ -3571,17 +3617,17 @@ VERBS = (
         "the code page of the texts in a .fon file (default: %s), or of the places 0..255 in"
         " the bitmaps of a TrueType font (default: the code page that the font declares,"
         " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ("patches",)),
-    ("fon", fon, "FILE.fon%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
-        "the directory that unpack made of a .fon file, or the bitmaps of one fixed-pitch"
-        " font",
+    ("fon", fon, "FILE.fon%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
+        "the directory that unpack made of a .fon file, the bitmaps of one fixed-pitch font,"
+        " or one font as a .fnt file",
         "the code page to write the texts in (default: the one %s records, or %s without it)"
         % (JSON_NAME, DEFAULT_ENCODING), ("rows", "unpack")),
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
         "the code page to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
-    ("ttf", ttf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+    ("ttf", ttf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
         "the .fon file, the directory that unpack made of a .fon file or of a TrueType font,"
-        " or the bitmaps of one fixed-pitch font",
+        " the bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names)", ("rows", "em", "aliases", "patches", "unpack")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
