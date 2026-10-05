@@ -18,6 +18,7 @@ import os
 import re
 import struct
 import sys
+import tempfile
 import unicodedata
 
 # Pillow reads and writes the PNG files. The import is checked when a verb runs, so that
@@ -42,7 +43,7 @@ pxfont fon [--codepage NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|F
 pxfont create [--codepage NAME] FONT
 pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N] [--rows N]
     [--unpack] FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt
-pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] DIR.files|FONT.png|...
+pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 
 unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
   FILE.files/. It reports what is broken, and whether the files give the same font back.
@@ -53,7 +54,7 @@ ttf: make the font of DIR.ttf.files/; or make a TrueType file of every font of a
   pixel a square, exact at --em pixels to the em (unless told, the height) and its multiples.
 expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph: "0,3,7".
 bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
-  half of each cell a pixel to the right. These five write a new file or directory.
+  half of each cell a pixel to the right. These five write a new image, or directory and font.
 
 The files of a directory, for each font:
   fon.json or ttf.json: every field. One named _x is computed, and ignored when read.
@@ -3401,33 +3402,68 @@ def alter_ttf(directory, change, warn):
     return model, sheet, cells, new if new != old else None
 
 
+def unpack_into(path, directory, name, warn):
+    """Write the files of a font file into a directory, as unpack does, without its report."""
+    set_encoding(name or DEFAULT_ENCODING)
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if data[:4] in SFNT_MAGICS:
+        model, sheet, cells = parse_ttf(data, warn, shown(path), encoding if name else None)
+        write_ttf_files(directory, model, sheet, cells,
+            os.path.splitext(os.path.basename(path))[0])
+        return
+    report = Report(quiet=True)
+    write_files(directory, data, report)
+    if report.errors:
+        die("%s has %d error(s), so its fonts may be damaged; unpack tells what they are"
+            % (shown(path), report.errors))
+
+
 def alter(target, name, rows, change):
     if is_bitmaps(target):
         return alter_file(target, rows, change)
     if rows is not None:
         die(ROWS_MISPLACED)
-    directory = target.rstrip("/\\")
-    if not os.path.isdir(directory):
-        die("%s is neither a directory that unpack made, nor a .png, a .psd or a .txt"
-            % shown(directory))
-    root, extension = os.path.splitext(os.path.basename(fon_path_of(directory)))
+    source = target.rstrip("/\\")
+    home = os.path.dirname(source)
 
     def warn(message):
         note("Warning: " + message)
 
-    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+    if os.path.isfile(source):
+        # A font file is unpacked into a directory of its name that is not kept.
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = os.path.join(scratch, os.path.basename(source) + FILES_SUFFIX)
+            unpack_into(source, directory, name, warn)
+            return alter_directory(directory, name, change, home, shown(source), warn)
+    if not os.path.isdir(source):
+        die("%s is neither a font file, nor a directory that unpack made, nor a .png, a .psd"
+            " or a .txt" % shown(source))
+    return alter_directory(source, name, change, home, shown_directory(source), warn)
+
+
+def alter_directory(directory, name, change, home, source, warn):
+    """Write the files of a directory, changed, into a new directory in home, and the font
+    of them beside it. source is what a message calls that which is changed."""
+    root, extension = os.path.splitext(os.path.basename(fon_path_of(directory)))
+    truetype = os.path.isfile(os.path.join(directory, TTF_JSON))
+    if truetype:
         model, sheet, cells, size = alter_ttf(directory, change, warn)
     else:
         data, size = alter_fon(directory, name, change, warn)
-    target = os.path.join(os.path.dirname(directory),
-        changed_name(root, change, size) + extension + FILES_SUFFIX)
+    font = os.path.join(home, changed_name(root, change, size) + extension)
+    target = font + FILES_SUFFIX
     check_backup(target)
-    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+    check_backup(font)
+    if truetype:
         write_ttf_files(target, model, sheet, cells, root)
-        count = 1
+        data, count = build_ttf_from(target), 1
     else:
         count = len(write_files(target, data, Report())[1])
-    print("Made %s of %s: %d font(s)." % (shown_directory(target), shown_directory(directory),
+    back_up(font)
+    with open(font, "wb") as handle:
+        handle.write(data)
+    print("Made %s and %s of %s: %d font(s)." % (shown_directory(target), shown(font), source,
         count))
     return 0
 
@@ -3452,8 +3488,8 @@ def bold_italic(target, name, rows):
     return alter(target, name, rows, Change(bold=True, italic=True))
 
 
-ALTERED = ("FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
-    "the directory that unpack made, or the bitmaps of one fixed-pitch font",
+ALTERED = ("FILE.fon|FILE.ttf|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+    "the font file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
     "the code page of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
 # A verb as its name, its function, its argument and the help for it, the help for
 # --codepage, and its other options: columns, which is an argument before the other one,
