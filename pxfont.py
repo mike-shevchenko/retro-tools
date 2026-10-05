@@ -343,12 +343,13 @@ def exit_with(main):
 
 
 def shown(path):
-    """Display form: forward slashes survive every shell, so a printed path can be pasted."""
-    return path.replace("\\", "/")
+    """Display form: forward slashes survive every shell, and the quotes tell where a path
+    with spaces ends, so a printed path can be pasted."""
+    return repr(path.replace("\\", "/"))
 
 
 def shown_directory(path):
-    return shown(path).rstrip("/") + "/"
+    return shown(path.replace("\\", "/").rstrip("/") + "/")
 
 
 class Report:
