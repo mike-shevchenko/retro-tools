@@ -36,7 +36,7 @@ FONTS = (
     ("ZX Spectrum 8x8px.psd", None, SPECTRUM_ALIASES),
     ("ZX Cyr 6x8px.psd", CYR_PATCHES, None),
     ("ZX Cyr 8x8px.psd", CYR_PATCHES, None),
-    ("Agat-7 Cyr 7x8px.psd", None, None),
+    ("Agat-7 7x8px.psd", None, None),
 )
 
 
