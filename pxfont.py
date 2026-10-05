@@ -62,8 +62,8 @@ The files of a directory, for each font:
     white and C0C0C0 by turns; the ink is 000080 on white and black on gray. A place of no
     char or of a zero-width one is transparent, and so is the paper of the default char, 127.
   NAME.txt: the same as text: X ink, `.` paper or a space for none, `|` and dashes between.
-  NAME.svg: a picture to lay under the PNG, with the char and the code in each cell.
-  fon and ttf take the PNG or the text; when both are there they must agree: delete one.
+  NAME.svg: the chars and their codes, to lay under the PNG. NAME.fnt: for other editors.
+  fon and ttf take the PNG, the text or the .fnt; those present must agree: delete the stale.
 
 A fixed-pitch font may have plainer bitmaps: text without the `|` and the dashes, and a PNG
   or a Photoshop .psd in any colors. Its first cell, blank, tells the paper: a color within
@@ -1122,12 +1122,33 @@ def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
     return widths, glyphs
 
 
+def read_fnt(path, sheet, _zero, height, _plain, _bare=None, _gap=None):
+    """The widths and glyphs that a .fnt file holds, in the order of the keys of the sheet,
+    which are the codes of its chars. Its header may tell other things than fon.json does,
+    but not other chars or another height."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+    report = Report(quiet=True)
+    parsed = parse_font(data, 1, shown(path), report)
+    if parsed is None or report.errors:
+        die("%s is not a whole raster font of version 2 or 3" % shown(path))
+    font, widths, glyphs = parsed
+    keys, header = sheet_keys(sheet), font["header"]
+    has = (header["dfFirstChar"], header["dfLastChar"], header["dfPixHeight"])
+    if has != (keys[0], keys[-1], height):
+        die("%s has the chars %d..%d, %d pixels high, where %s tells of %d..%d and %d; change"
+            " the font there to match, or delete the file"
+            % ((shown(path),) + has + (JSON_NAME, keys[0], keys[-1], height)))
+    return widths, glyphs
+
+
 def load_glyphs(directory, names, sheet, zero, height, plain, where, listed=None, bare=None,
         gap=None):
-    """The widths and bitmaps of a font from its PNG, its text file, or both when they
-    agree, in the order of the keys of the sheet."""
+    """The widths and bitmaps of a font from its PNG, its text file or its .fnt file, or
+    from those of them that are there when they agree, in the order of the keys of the
+    sheet."""
     found = []
-    for name, reader in zip(names, (read_png, read_text)):
+    for name, reader in zip(names, (read_png, read_text, read_fnt)):
         if name is None:
             continue
         if not isinstance(name, str) or os.path.basename(name) != name:
@@ -1143,7 +1164,7 @@ def load_glyphs(directory, names, sheet, zero, height, plain, where, listed=None
     for other, other_widths, other_glyphs in found[1:]:
         for key, one, two in zip(keys, zip(widths, glyphs), zip(other_widths, other_glyphs)):
             if one != two:
-                die("%s differs between %s and %s; delete the one that was not edited"
+                die("%s differs between %s and %s; delete the files that were not edited"
                     % (key_label(key), shown(path), shown(other)))
     without = set(key for key, width in zip(keys, widths) if not width)
     if without != zero:
@@ -1262,7 +1283,7 @@ def parse_font(data, unit, where, report):
         report.warning("%s: ink right of the char's width, which the bitmap files cannot"
             " hold, in char %s" % (where, ", ".join(stray)))
 
-    font = {"png": None, "txt": None, "header": read_fields(spec, data, 0),
+    font = {"png": None, "txt": None, "fnt": None, "header": read_fields(spec, data, 0),
         "zero_width": ranges_text(first + index for index, width in enumerate(widths)
             if not width),
         "absolute_space_width": table[-1][0]}
@@ -1609,7 +1630,7 @@ def default_place(header):
 def build_font(value, where, load, problems, warn):
     """A font resource from its fon.json object and its bitmap files."""
     fields = Fields(value, where)
-    names = (fields.take("png"), fields.take("txt"))
+    names = (fields.take("png"), fields.take("txt"), fields.take("fnt", None))
     header_value = fields.take("header")
     version = as_int(Fields(header_value, where + ".header").take("dfVersion"),
         where + ".header.dfVersion", 0xFFFF)
@@ -1828,6 +1849,39 @@ def build_fon(model, load, warn):
     return bytes(image)
 
 
+def fnt_differences(directory, model, warn):
+    """Warn of each .fnt file of a directory whose header tells other than fon.json, which
+    rules. The chars and the height are not among these: with others the file is refused."""
+    shaping = COMPUTED | frozenset(("dfFirstChar", "dfLastChar", "dfPixHeight"))
+    try:
+        fonts = [(resource["font"], "resource_table.types[%d].resources[%d].font" % (t, r))
+            for t, one in enumerate(model["resource_table"]["types"])
+            for r, resource in enumerate(one["resources"]) if "font" in resource]
+    except (KeyError, TypeError):
+        return
+    for font, where in fonts:
+        try:
+            path = os.path.join(directory, font["fnt"])
+            with open(path, "rb") as handle:
+                data = handle.read()
+            told = raw_fields(FNT_HEADER, data, 0)
+            names = set(name for name, _code, _kind in FNT_HEADER)
+            rules = raw_fields(FNT_HEADER, pack_fields(FNT_HEADER, dict((key, value)
+                for key, value in font["header"].items() if key in names),
+                where + ".header", dict.fromkeys(COMPUTED, 0))[0], 0)
+            at, named = told["dfFace"], font["face_name"]
+            face = data[at:data.find(b"\0", at)] if at else None
+            other = [name for name, _code, _kind in FNT_HEADER
+                if name not in shaping and told[name] != rules[name]]
+            if face != (None if named is None else bytes_of(named, where + ".face_name")):
+                other.append("face_name")
+        except (KeyError, TypeError, OSError, struct.error, Failure):
+            continue
+        if other:
+            warn("%s: its header differs from %s in %s; %s rules"
+                % (shown(path), JSON_NAME, ", ".join(other), JSON_NAME))
+
+
 def build_from(directory, warn, name=None):
     """The .fon file that the files in the directory describe. Its texts are in the encoding
     named, or else in the one that fon.json records."""
@@ -1840,6 +1894,7 @@ def build_from(directory, warn, name=None):
     if not isinstance(model, dict) or "codepage" not in model:
         die("%s: codepage is missing" % JSON_NAME)
     set_encoding(name or model["codepage"])
+    fnt_differences(directory, model, warn)
     return build_fon(model, functools.partial(load_glyphs, directory), warn)
 
 
@@ -1947,7 +2002,7 @@ def name_fonts(fonts):
             serial += 1
             name = "%s (%d)" % (base, serial)
         taken.add(name.lower())
-        font["txt"] = name + ".txt"
+        font["txt"], font["fnt"] = name + ".txt", name + ".fnt"
         if any(widths):
             font["png"] = name + ".png"
 
@@ -1967,6 +2022,14 @@ def back_up(path):
         show = shown_directory if os.path.isdir(path) else shown
         os.rename(path, path + BACKUP_SUFFIX)
         print("Renamed the existing %s to %s" % (show(path), show(path + BACKUP_SUFFIX)))
+
+
+def fnt_bytes(font, widths, glyphs):
+    """A font as a .fnt file: the resource that packing makes of it, without what follows
+    the font in a .fon file."""
+    value = dict((key, item) for key, item in font.items() if key != "tail")
+    return build_font(value, "the font", lambda *_font: (widths, glyphs), [],
+        lambda _message: None)
 
 
 def write_files(directory, data, report):
@@ -1993,6 +2056,14 @@ def write_files(directory, data, report):
         with open(os.path.join(directory, font["txt"]), "w", encoding="ascii",
                 newline="\n") as handle:
             handle.write("\n".join(text_lines(sheet, cells, height, bare)) + "\n")
+        try:
+            made = fnt_bytes(font, widths, glyphs)
+        except Failure as failure:
+            report.warning("%s is not written: %s" % (font["fnt"], failure))
+            font["fnt"] = None
+            continue
+        with open(os.path.join(directory, font["fnt"]), "wb") as handle:
+            handle.write(made)
     with open(os.path.join(directory, JSON_NAME), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json_text(model) + "\n")
     return model, fonts
@@ -2145,9 +2216,9 @@ def new_model(face, file, width, height, codes, ascent, leading, bold, italic):
                 rnFlags=0x0C50, rnID=names_at - NE_SIZE,
                 fontdir={"entries": [{"fontOrdinal": 1, "same_as_font": True}]})]},
             {"rtTypeID": RT_FONT, "rtReserved": 0, "resources": [dict(resource,
-                rnFlags=0x1C30, rnID=0x8001, font={"png": None, "txt": None, "header": header,
-                    "zero_width": "", "absolute_space_width": 8, "device_name": None,
-                    "face_name": face + FON_SUFFIX})]},
+                rnFlags=0x1C30, rnID=0x8001, font={"png": None, "txt": None, "fnt": None,
+                    "header": header, "zero_width": "", "absolute_space_width": 8,
+                    "device_name": None, "face_name": face + FON_SUFFIX})]},
             {"rtTypeID": RT_VERSION, "rtReserved": 0, "resources": [dict(resource,
                 rnFlags=0x0C30, rnID=0x8001, version={"block": version})]}],
             "names": [{"offset": names_at - NE_SIZE, "name": "FONTDIR"}]},
@@ -3332,7 +3403,8 @@ def alter_fon(directory, name, change, warn):
                 "dfFirstChar", "dfLastChar", "dfPixHeight", "dfPixWidth", "dfAvgWidth",
                 "dfMaxWidth", "dfPitchAndFamily", "dfWeight", "dfItalic", "dfDefaultChar"))
             first, last = stated["dfFirstChar"], stated["dfLastChar"]
-            widths, glyphs = load_glyphs(directory, (font["png"], font["txt"]),
+            widths, glyphs = load_glyphs(directory,
+                (font["png"], font["txt"], font.get("fnt")),
                 fon_sheet(first, last), parse_ranges(font["zero_width"], where, first, last),
                 stated["dfPixHeight"], False if stated["dfPitchAndFamily"] & 1
                 else stated["dfPixWidth"] or None, where, None, default_place(stated),
