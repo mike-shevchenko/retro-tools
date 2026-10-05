@@ -38,9 +38,9 @@ except ImportError:
 USAGE = """\
 Usage:
 pxfont unpack [--encoding NAME] FILE.fon|FILE.ttf
-pxfont fon [--encoding NAME] [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
+pxfont fon [--encoding NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt
 pxfont create [--encoding NAME] FONT
-pxfont ttf [--encoding NAME] [--em N] [--rows N] [--aliases LIST] FILE.fon|DIR.files|...
+pxfont ttf [--encoding NAME] [--em N] [--rows N] [--aliases LIST] [--unpack] FILE.fon|DIR.files|...
 pxfont expand|contract [--rows N] COLUMNS DIR.files|FONT.png|FONT.psd|FONT.txt
 pxfont bold|italic|bold-italic [--rows N] DIR.files|FONT.png|FONT.psd|FONT.txt
 
@@ -82,6 +82,7 @@ TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the 
 
 --encoding NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
 --aliases 00A9=.notdef,00A3=0060,2191=005E: ttf adds chars that show .notdef or another char.
+--unpack: fon and ttf then unpack the font that they made, into FILE.files/, for a check.
 """
 
 JSON_NAME = "fon.json"
@@ -2047,11 +2048,16 @@ def fon_path_of(directory):
     return directory[:-len(FILES_SUFFIX)]
 
 
-def fon(target, name, rows):
+UNPACK_MISPLACED = "--unpack is not for %s: it would be unpacked over the files it is made of"
+
+
+def fon(target, name, rows, then_unpack):
     if is_bitmaps(target):
-        return fon_bitmaps(target, name, rows)
+        return fon_bitmaps(target, name, rows, then_unpack)
     if rows is not None:
         die(ROWS_MISPLACED)
+    if then_unpack:
+        die(UNPACK_MISPLACED % shown_directory(target.rstrip("/\\")))
     directory = target.rstrip("/\\")
     if not os.path.isdir(directory):
         die("%s is neither a directory that unpack made, nor a .png, a .psd or a .txt"
@@ -2221,10 +2227,12 @@ def fon_of_bitmaps(path, name, rows):
         leading))
 
 
-def fon_bitmaps(path, name, rows):
-    """Make a file of one fixed-pitch font from its bitmaps alone."""
+def fon_bitmaps(path, name, rows, then_unpack):
+    """Make a file of one fixed-pitch font from its bitmaps alone, and unpack it if told."""
     target = os.path.splitext(path)[0] + ".fon"
     check_backup(target)
+    if then_unpack:
+        check_backup(target + FILES_SUFFIX)
     data, what = fon_of_bitmaps(path, name, rows)
     for font, widths, glyphs, _where in parse_fon(data, Report(quiet=True))[1]:
         chars = CHARSET_ENCODINGS.get(font["header"]["dfCharSet"], encoding)
@@ -2236,7 +2244,7 @@ def fon_bitmaps(path, name, rows):
     with open(target, "wb") as handle:
         handle.write(data)
     print("Made %s of %s: %s." % (shown(target), shown(path), what))
-    return 0
+    return unpack(target, name) if then_unpack else 0
 
 
 def create(name, encoding_name):
@@ -3005,8 +3013,10 @@ def ttf_targets(source, fonts):
     return out
 
 
-def ttf_of_files(directory, em, aliases):
+def ttf_of_files(directory, em, aliases, then_unpack):
     """Make the TrueType font of the files that unpack wrote of one."""
+    if then_unpack:
+        die(UNPACK_MISPLACED % shown_directory(directory))
     for option, given in (("em", em), ("aliases", aliases)):
         if given is not None:
             die("--%s is not for %s: %s there tells the %s"
@@ -3021,7 +3031,7 @@ def ttf_of_files(directory, em, aliases):
     return 0
 
 
-def ttf(target, name, rows, em, aliases):
+def ttf(target, name, rows, em, aliases, then_unpack):
     need_fonttools()
     if em is not None and em < 1:
         die("--em must be 1 or more pixels")
@@ -3032,7 +3042,7 @@ def ttf(target, name, rows, em, aliases):
     elif rows is not None:
         die(ROWS_MISPLACED)
     elif os.path.isfile(os.path.join(target, TTF_JSON)):
-        return ttf_of_files(target.rstrip("/\\"), em, aliases)
+        return ttf_of_files(target.rstrip("/\\"), em, aliases, then_unpack)
     elif os.path.isdir(target):
         source = fon_path_of(target.rstrip("/\\"))
         data = build_from(target.rstrip("/\\"), lambda message: note("Warning: " + message),
@@ -3048,6 +3058,8 @@ def ttf(target, name, rows, em, aliases):
     targets = ttf_targets(source, fonts)
     for path, _family, _style in targets:
         check_backup(path)
+        if then_unpack:
+            check_backup(path + FILES_SUFFIX)
     built = []
     for (font, widths, glyphs, _where), (_path, family, style) in zip(fonts, targets):
         header = font["header"]
@@ -3070,7 +3082,12 @@ def ttf(target, name, rows, em, aliases):
     if report.errors:
         note("%s has %d error(s), so its fonts may be damaged; unpack tells what they are"
             % (shown(target), report.errors))
-    return 1 if report.errors else 0
+    statuses = [1 if report.errors else 0]
+    if then_unpack:
+        # Each font is unpacked by the encoding that gave it its chars.
+        statuses += [unpack(path, chars) for (_header, chars, _size, _made, _count),
+            (path, _family, _style) in zip(built, targets)]
+    return max(statuses)
 
 
 # ----------------------------------------------------------------------------------------
@@ -3363,7 +3380,7 @@ VERBS = (
         "the directory that unpack made of a .fon file, or the bitmaps of one fixed-pitch"
         " font",
         "the encoding to write the texts in (default: the one %s records, or %s without it)"
-        % (JSON_NAME, DEFAULT_ENCODING), ("rows",)),
+        % (JSON_NAME, DEFAULT_ENCODING), ("rows", "unpack")),
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
         "the encoding to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
@@ -3371,7 +3388,7 @@ VERBS = (
         "the .fon file, the directory that unpack made of a .fon file or of a TrueType font,"
         " or the bitmaps of one fixed-pitch font",
         "the encoding of the chars and of the texts (default: for the chars, the one that"
-        " dfCharSet names)", ("rows", "em", "aliases")),
+        " dfCharSet names)", ("rows", "em", "aliases", "unpack")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
@@ -3382,6 +3399,8 @@ OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
     "em": "the height of the em in pixels (default: the height of the chars)",
+    "unpack": "then unpack each font file that is made, into FILE%s, as the verb unpack"
+        " does: to check what the font has" % FILES_SUFFIX,
     "aliases": "more Unicode chars for the glyphs of the font, as"
         " 00A9=.notdef,U+00A3=0060,2191=005E for the copyright sign, the pound and the up"
         " arrow of ZX Spectrum: each is a char, then what gives it the glyph: .notdef for the"
@@ -3409,6 +3428,8 @@ def main():
     for option in options:
         if option == "aliases":
             parser.add_argument("--" + option, metavar="LIST", help=OPTIONS[option])
+        elif option == "unpack":
+            parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
         elif option != "columns":
             parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
     args = parser.parse_args(argv[1:])
