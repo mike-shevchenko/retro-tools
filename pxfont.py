@@ -80,7 +80,7 @@ TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the 
   reported, hinting and kerning dropped. The places 0..255 follow --codepage, or the one
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
 --codepage NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
---codepage-patches 98=00A3: unpack and ttf take the place 98, which has no char, for U+00A3.
+--codepage-patches 98=00A3: for unpack and ttf, the place 98, of no char or of NBSP, is U+00A3.
 --aliases 00A9=.notdef,00A3=0060,2191=005E: ttf adds chars that show .notdef or another char.
 --unpack: fon and ttf then unpack the font that they made, into FILE.files/, for a check.
 """
@@ -2423,10 +2423,14 @@ def is_control(point):
     return unicodedata.category(chr(point)) == "Cc"
 
 
+NBSP, SPACE = 0xA0, 0x20
+
+
 class CodePage:
     """The code page of the chars of a font: a Python codec of single bytes by its name, and
     patches, each the code of a place that the codec has no char for, or a control one,
-    with the code point that the place stands for."""
+    with the code point that the place stands for. A patch may also take the place of
+    NBSP, which is as blank as the space is: nbsp_patched tells that one has."""
 
     def __init__(self, name, patches=None):
         self.name, self.patches, self.points = name, dict(patches or {}), {}
@@ -2439,14 +2443,17 @@ class CodePage:
                 self.points[code] = ord(char)
         taken = dict((point, code) for code, point in self.points.items())
         for code, point in sorted(self.patches.items()):
-            if code in self.points and not is_control(self.points[code]):
+            if code in self.points and not is_control(self.points[code]) and (
+                    self.points[code] != NBSP):
                 die("the code page patch %02X=%04X: the place has a char in %s, U+%04X; a patch"
-                    " is for a place that has none" % (code, point, name, self.points[code]))
+                    " is for a place that has none, or for that of NBSP"
+                    % (code, point, name, self.points[code]))
             if point in taken or is_control(point):
                 die("the code page patch %02X=%04X: U+%04X is %s" % (code, point, point,
                     "a control char" if is_control(point) else "at the place %02X already"
                     % taken[point]))
             taken[point] = code
+        self.nbsp_patched = any(self.points.get(code) == NBSP for code in self.patches)
         self.points.update(self.patches)
 
     def __str__(self):
@@ -2576,6 +2583,9 @@ def build_ttf(font, widths, glyphs, page, family, style, em, aliases=()):
         else:
             die("%s: U+%04X, to give its glyph to U+%04X, is not a char of the font"
                 % (where, source, char))
+    # NBSP, when a patch has taken its place, shows the glyph of the space.
+    if page.nbsp_patched and NBSP not in cmap and SPACE in cmap:
+        cmap[NBSP] = cmap[SPACE]
     plain = ["".join(char for char in text if char.isascii() and char.isalnum())
         for text in (family, style)]
     names = {1: family, 2: style, 3: "%s %s, TrueType" % (family, style),
@@ -3476,7 +3486,8 @@ OPTIONS = {
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
     "em": "the height of the em in pixels (default: the height of the chars)",
     "patches": "chars for the places that the code page has none for, or control ones: pairs"
-        " in hex of a place and the code point of its char, as 98=00A3,7F=U+2302",
+        " in hex of a place and the code point of its char, as 98=00A3,7F=U+2302. The place"
+        " of NBSP may be taken too, as A0=2191: NBSP then shows the glyph of the space",
     "unpack": "then unpack each font file that is made, into FILE%s, as the verb unpack"
         " does: to check what the font has" % FILES_SUFFIX,
     "aliases": "more Unicode chars for the glyphs of the font, as"
