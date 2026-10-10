@@ -38,32 +38,39 @@ except ImportError:
 
 USAGE = """\
 Usage:
-pxfont unpack [--codepage NAME] [--codepage-patches LIST] FILE.fon|FILE.ttf
+pxfont unpack [--codepage NAME] [--codepage-patches LIST] FILE.fon|FILE.ttf|FILE.bdf
 pxfont fon [--codepage NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont create [--codepage NAME] FONT
 pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N] [--rows N]
-    [--unpack] FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
+    [--unpack] FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
+pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack]
+    FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 
-unpack: write a 16-bit .fon file, or a TrueType font drawn of pixels, as files to edit, into
-  FILE.files/. It reports what is broken, and whether the files give the same font back.
+unpack: write a 16-bit .fon file, a TrueType font drawn of pixels or a BDF font, as files to
+  edit, into FILE.files/. It reports what is broken, and whether the files give the same font
+  back.
 fon: make the .fon file of DIR.fon.files/, which any inconsistency in the files stops; or
   make FONT.fon of FONT.fnt, or of bitmaps alone: one fixed-pitch font of the chars from 32 on.
 create: write FONT.fon.files/ of a blank font, 8x8 or of the size in the name: "zx 6x10px".
-ttf: make the font of DIR.ttf.files/; or make a TrueType file of every font of a .fon, each
-  pixel a square, exact at --em pixels to the em (unless told, the height) and its multiples.
+ttf: make the font of DIR.ttf.files/; or make a TrueType file of every font of a .fon, or of
+  a BDF font, each pixel a square, exact at --em pixels to the em (unless told, the height)
+  and its multiples.
+bdf: make the font of DIR.bdf.files/; or make a Unicode BDF file of every font of a .fon.
 expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph: "0,3,7".
 bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
   half of each cell a pixel to the right. These five write a new image, or directory and font.
 
 The files of a directory, for each font:
-  fon.json or ttf.json: every field. One named _x is computed, and ignored when read.
+  fon.json, ttf.json or bdf.json: every field. One named _x is computed, and ignored when
+    read.
   NAME.png: the bitmaps, 32 places to a row, a char at its code modulo 32. The papers are
     white and C0C0C0 by turns; the ink is 000080 on white and black on gray. A place of no
     char or of a zero-width one is transparent, and so is the paper of the default char, 127.
   NAME.txt: the same as text: X ink, `.` paper or a space for none, `|` and dashes between.
   NAME.svg: the chars and their codes, to lay under the PNG. NAME.fnt: for other editors.
-  fon and ttf take the PNG, the text or the .fnt; those present must agree: delete the stale.
+  fon, ttf and bdf take the PNG, the text or the .fnt; those present must agree: delete the
+    stale.
 
 A fixed-pitch font may have plainer bitmaps: text without the `|` and the dashes, and a PNG
   or a Photoshop .psd in any colors. Its first cell, blank, tells the paper: a color within
@@ -74,20 +81,30 @@ Bitmaps alone: the file is named as the font, "zx 6x8px Bold.png". The size in t
   give the ascent. The glyph at 127 is shown for a missing char. The face ends with " FON".
 
 Names: a font is named by its face, its size, "6x8px" or "13px" when the widths differ, and
-  Bold, Italic. The bitmap files, the .ttf files and what the altering verbs write are named
+  Bold, Italic. The bitmap files, the .ttf, .bdf files and what the altering verbs write are named
   so; a new width gives a new size, or "wide" or "narrow" when the name tells no size.
 
 TrueType: a glyph is the pixels whose centers its outline holds; glyphs off the grid are
   reported, hinting and kerning dropped. The places 0..255 follow --codepage, or the one
   code page that the font declares, or cp1251; .notdef is at 127 when that place is free.
+
+BDF: a cell is as wide as the advance, DWIDTH, and as high as the line, FONT_ASCENT and
+  FONT_DESCENT, and the ink beyond it; ink outside the advance is cut. The places 0..255 of
+  a Unicode font are as of a TrueType one; of another, they are its codes, which --codepage
+  or the registry names. Packing computes BBX, CHARS, SWIDTH, and FONTBOUNDINGBOX when
+  bdf.json has null for it; overrides holds the lines of a glyph that are not so, and its
+  name when glyph_names does not give it. Packing gives the original back unless unpack
+  says otherwise.
 --codepage NAME: the Python codec of texts and chars; unless told, as recorded, or cp1251.
---codepage-patches 98=00A3: for unpack and ttf, the place 98, of no char or of NBSP, is U+00A3.
+--codepage-patches 98=00A3: for unpack, ttf and bdf, the place 98, of no char or of NBSP, is
+  U+00A3.
 --aliases 00A9=.notdef,00A3=0060,2191=005E: ttf adds chars that show .notdef or another char.
---unpack: fon and ttf then unpack the font that they made, into FILE.files/, for a check.
+--unpack: fon, ttf and bdf then unpack the font that they made, into FILE.files/, for a check.
 """
 
 JSON_NAME = "fon.json"
 TTF_JSON = "ttf.json"
+BDF_JSON = "bdf.json"
 FILES_SUFFIX = ".files"
 BACKUP_SUFFIX = ".BAK"
 LINE_WIDTH = 99
@@ -255,6 +272,20 @@ NAME_SIZE = re.compile(r"(?i) (?:(\d+)x)?(\d+)px$")
 FON_SUFFIX = " FON"
 # What a font name calls a charset that names no encoding.
 CHARSET_NAMES = {2: "Symbol", 255: "OEM"}
+# How a BDF file begins: comments, if any, then STARTFONT. Its texts are read in the first
+# of the encodings that takes them.
+BDF_START = re.compile(rb"(?:[ \t\r]*(?:COMMENT[^\n]*)?\n)*STARTFONT\b")
+BDF_TEXT_ENCODINGS = ("utf-8", "latin-1")
+BDF_LINE = re.compile(r"(\S*)[ \t]?(.*)")
+# The registry of a BDF font whose codes are those of Unicode.
+BDF_UNICODE = "ISO10646"
+BDF_MAX_CODE = 0xFFFFFFFF
+# The names of the glyphs by their codes, of which unpacking takes the one that most glyphs
+# have; a glyph named otherwise has its name in the overrides.
+BDF_NAME_FORMATS = ("uni%04X", "char%d")
+BDF_NAME_FORMAT = re.compile(r"[^%]*%0?[0-9]*[dX][^%]*")
+# The lines of a glyph that bdf.json may give otherwise than packing makes them.
+BDF_OVERRIDES = ("STARTCHAR", "ENCODING", "SWIDTH", "BBX")
 ROWS_MISPLACED = "--rows goes with a .png, a .psd or a .txt, which hold the bitmaps alone"
 NEW_FONT = {
     "dfVersion": 0x0200, "dfCopyright": "", "dfType": 0, "dfExternalLeading": 0,
@@ -614,8 +645,9 @@ def ranges_text(codes):
         for low, high in runs)
 
 
-def parse_ranges(value, where, first, last):
-    """The char codes that ranges like "127..160, 240" name, all within first..last."""
+def parse_ranges(value, where, first, last, limits="dfFirstChar..dfLastChar"):
+    """The char codes that ranges like "127..160, 240" name, all within first..last, which a
+    message calls limits."""
     if not isinstance(value, str):
         die("%s: must be a string of char codes and ranges, like \"127..160, 240\"" % where)
     codes = set()
@@ -629,8 +661,8 @@ def parse_ranges(value, where, first, last):
         if len(ends) not in (1, 2) or ends[0] > ends[-1]:
             die("%s: %r is not a char code or a range like 127..160" % (where, part.strip()))
         if ends[0] < first or ends[-1] > last:
-            die("%s: %s is not within dfFirstChar..dfLastChar, which are %d..%d"
-                % (where, part.strip(), first, last))
+            die("%s: %s is not within %s, which are %d..%d"
+                % (where, part.strip(), limits, first, last))
         codes.update(range(ends[0], ends[-1] + 1))
     return codes
 
@@ -2082,8 +2114,11 @@ def unpack_file(path, name, patches=None):
         data = handle.read()
     if data[:4] in SFNT_MAGICS:
         return unpack_ttf(path, data, encoding if name else None, patches)
+    if is_bdf_data(data):
+        return unpack_bdf(path, data, encoding if name else None, patches)
     if patches:
-        die("--codepage-patches is for a TrueType font, and %s is not one" % shown(path))
+        die("--codepage-patches is for a TrueType or a BDF font, and %s is neither"
+            % shown(path))
     report = Report()
     model, fonts = write_files(directory, data, report)
     print("Unpacked %s into %s: %d font(s)."
@@ -2184,9 +2219,10 @@ def fon(target, name, rows, then_unpack):
     if not os.path.isdir(directory):
         die("%s is neither a directory that unpack made, nor a .png, a .psd or a .txt"
             % shown(directory))
-    if os.path.isfile(os.path.join(directory, TTF_JSON)):
-        die("%s holds a TrueType font, which the verb ttf makes; a .fon is not made of one"
-            % shown_directory(directory))
+    for json_name, kind, verb in ((TTF_JSON, "a TrueType", "ttf"), (BDF_JSON, "a BDF", "bdf")):
+        if os.path.isfile(os.path.join(directory, json_name)):
+            die("%s holds %s font, which the verb %s makes; a .fon is not made of one"
+                % (shown_directory(directory), kind, verb))
     path = fon_path_of(directory)
     check_backup(path)
     data = build_from(directory, lambda message: note("Warning: " + message), name)
@@ -2455,7 +2491,7 @@ def make_ttf(info, glyphs, cmap):
     """A TrueType file. Of info, units is the font units of a pixel, and em, ascent, descent,
     line_gap, the underline and the average width are in pixels; below is how many rows
     of a bitmap lie below the baseline; names are texts by their ids in the name table;
-    page is the code page by which the chars have their codes in the bitmaps.
+    page is the code page by which the chars have their codes in the bitmaps, or None.
     glyphs lists (name, bitmap): the outline of a glyph is that of the pixels of its bitmap,
     and a glyph without a bitmap is empty, of no width. cmap gives the glyph names of the
     codes."""
@@ -2514,7 +2550,7 @@ def make_ttf(info, glyphs, cmap):
     os2.recalcUnicodeRanges(builder.font)
     os2.recalcCodePageRanges(builder.font)
     # The code page is declared whatever chars of it the font has.
-    if info["page"].name in CODE_PAGES:
+    if info["page"] is not None and info["page"].name in CODE_PAGES:
         os2.ulCodePageRange1 |= 1 << CODE_PAGES.index(info["page"].name)
     builder.setupPost(isFixedPitch=int(fixed),
         underlinePosition=info["underline"][0] * units,
@@ -2784,14 +2820,19 @@ def missing_place(codes, names, page):
 
 def ttf_sheet(codes, names, page):
     """The rows of the bitmaps of a TrueType font: the chars that the code page has for the
-    codes 0..255, each in the slot of that code modulo 32, without the rows of no char;
-    then the other chars, 32 to a row with no gaps; then the glyphs without a code. Of
-    these, the glyph of a missing char is in the slot of the default char of a font made
-    of bitmaps, when no char is there."""
-    sheet, placed, names = [], {}, list(names)
-    for code, char in page.chars().items():
-        if char in codes:
-            placed[code] = code_key(char)
+    places 0..255 in those places, then the other chars, then the glyphs without a code."""
+    placed = dict((code, code_key(char)) for code, char in page.chars().items()
+        if char in codes)
+    return placed_sheet(placed, [code_key(code) for code in sorted(codes)], names)
+
+
+def placed_sheet(placed, keys, names):
+    """The rows of the bitmaps of a font of chars in places 0..255 and of other chars: the
+    keys placed, each in the slot of its place modulo 32, without the rows of no char; then
+    the other keys, 32 to a row with no gaps; then the glyphs without a code. Of these, the
+    glyph of a missing char is in the slot of the default char of a font made of bitmaps,
+    when no char is there."""
+    sheet, placed, names = [], dict(placed), list(names)
     if MISSING_GLYPH in names and NEW_DEFAULT_CHAR not in placed:
         names.remove(MISSING_GLYPH)
         placed[NEW_DEFAULT_CHAR] = MISSING_GLYPH
@@ -2801,8 +2842,7 @@ def ttf_sheet(codes, names, page):
             row.pop()
         if row:
             sheet.append(row)
-    others = [code_key(code) for code in sorted(codes)]
-    for keys in ([key for key in others if key not in placed.values()], names):
+    for keys in ([key for key in keys if key not in placed.values()], names):
         sheet.extend(keys[at:at + CHARS_PER_ROW] for at in range(0, len(keys), CHARS_PER_ROW))
     return sheet
 
@@ -3048,23 +3088,30 @@ def write_ttf_files(directory, model, sheet, cells, fallback):
     """Write the files of a TrueType font into a new directory. The bitmap files are named
     after the font, or after the fallback when it has no name."""
     names = model["names"]
-    base = file_name(names.get("full_name") or names.get("family") or fallback)
+    bare = bare_cell(cells, MISSING_GLYPH if missing_place(
+        parse_hex_ranges(model["chars"], "chars"), model["glyphs"], page_of(model))
+        else None, usual_width(cells))
+    write_cell_files(directory, TTF_JSON, model, sheet, cells,
+        file_name(names.get("full_name") or names.get("family") or fallback), bare,
+        lambda key: (chr(int(key[len(CODE_PREFIX):], 16)), key[len(CODE_PREFIX):])
+        if key.startswith(CODE_PREFIX) else (None, key))
+
+
+def write_cell_files(directory, json_name, model, sheet, cells, base, bare, legend):
+    """Write the files of a font of cells on a baseline into a new directory: the bitmap
+    files, named base, and the object of the JSON file, which names them. The legend gives
+    the char, or None, and the code of a key."""
     model["png"], model["txt"] = base + ".png", base + ".txt"
     height = model["rows_above_baseline"] + model["rows_below_baseline"]
     gap = usual_width(cells)
-    bare = bare_cell(cells, MISSING_GLYPH if missing_place(
-        parse_hex_ranges(model["chars"], "chars"), model["glyphs"], page_of(model))
-        else None, gap)
     back_up(directory)
     os.mkdir(directory)
     write_png(os.path.join(directory, model["png"]), sheet, cells, height, gap, bare)
-    write_svg(os.path.join(directory, base + ".svg"), sheet, cells, height, gap,
-        lambda key: (chr(int(key[len(CODE_PREFIX):], 16)), key[len(CODE_PREFIX):])
-        if key.startswith(CODE_PREFIX) else (None, key), bare)
+    write_svg(os.path.join(directory, base + ".svg"), sheet, cells, height, gap, legend, bare)
     with open(os.path.join(directory, model["txt"]), "w", encoding="ascii",
             newline="\n") as handle:
         handle.write("\n".join(text_lines(sheet, cells, height, bare)) + "\n")
-    with open(os.path.join(directory, TTF_JSON), "w", encoding="utf-8", newline="\n") as handle:
+    with open(os.path.join(directory, json_name), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json_text(model) + "\n")
 
 
@@ -3115,15 +3162,17 @@ def whole_number(fields, name, low, high):
     return value
 
 
-def build_ttf_from(directory):
-    """The TrueType file that the files in the directory describe."""
-    path = os.path.join(directory, TTF_JSON)
+def load_json(path):
     try:
         with open(path, encoding="utf-8") as handle:
-            model = json.load(handle)
+            return json.load(handle)
     except ValueError as error:
         die("%s is not valid JSON: %s" % (shown(path), error))
-    top = Fields(model, TTF_JSON)
+
+
+def build_ttf_from(directory):
+    """The TrueType file that the files in the directory describe."""
+    top = Fields(load_json(os.path.join(directory, TTF_JSON)), TTF_JSON)
     texts = Fields(top.take("names"), "names")
     names = {}
     for key, name_id in TTF_NAMES:
@@ -3198,7 +3247,7 @@ def build_ttf_from(directory):
     return make_ttf(info, glyphs, cmap)
 
 
-def ttf_targets(source, fonts):
+def ttf_targets(source, fonts, extension=".ttf"):
     """The file, the family and the style for each font of a file: the file is beside the
     source, and has the name of the font."""
     taken, out = set(), []
@@ -3208,7 +3257,7 @@ def ttf_targets(source, fonts):
             die("%s has more than one font named %r; tell them apart by their face names in"
                 " %s, which unpack writes" % (shown(source), name, JSON_NAME))
         taken.add(name.lower())
-        out.append((os.path.join(os.path.dirname(source), file_name(name) + ".ttf"), family,
+        out.append((os.path.join(os.path.dirname(source), file_name(name) + extension), family,
             style))
     return out
 
@@ -3231,12 +3280,10 @@ def ttf_of_files(directory, em, aliases, patches, then_unpack):
     return 0
 
 
-def ttf(target, name, rows, em, aliases, patches, then_unpack):
-    need_fonttools()
-    if em is not None and em < 1:
-        die("--em must be 1 or more pixels")
-    pairs = parse_aliases(aliases) if aliases is not None else []
-    places = parse_patches(patches) if patches is not None else {}
+def fon_fonts(target, name, rows, kind):
+    """The fonts of a .fon file, of the directory that unpack made of one, of bitmaps alone
+    or of a .fnt file, to make fonts of the kind of, with the file that the new fonts are
+    put beside, and the report of the errors of the .fon file."""
     source = target
     if is_bitmaps(target):
         data = fon_of_bitmaps(target, name, rows)[0]
@@ -3244,8 +3291,6 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack):
         die(ROWS_MISPLACED)
     elif is_fnt(target):
         data = fon_of_fnt(target, name)[0]
-    elif os.path.isfile(os.path.join(target, TTF_JSON)):
-        return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack)
     elif os.path.isdir(target):
         source = fon_path_of(target.rstrip("/\\"))
         data = build_from(target.rstrip("/\\"), lambda message: note("Warning: " + message),
@@ -3254,10 +3299,114 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack):
         set_encoding(name or DEFAULT_ENCODING)
         with open(target, "rb") as handle:
             data = handle.read()
+        if data[:4] in SFNT_MAGICS:
+            die("%s is a TrueType font; %s font is not made of one" % (shown(target), kind))
     report = Report(quiet=True)
     _model, fonts = parse_fon(data, report)
     if not fonts:
         die("%s has no raster font to convert" % shown(target))
+    return fonts, source, report
+
+
+def bdf_source(target):
+    """The bytes of a BDF font, of the file or of the directory that unpack made of one, and
+    the file that the fonts made of it are put beside; None for any other target."""
+    directory = target.rstrip("/\\")
+    if os.path.isfile(os.path.join(directory, BDF_JSON)):
+        return build_bdf_from(directory, lambda message: note("Warning: " + message)), (
+            fon_path_of(directory))
+    if os.path.isfile(target):
+        with open(target, "rb") as handle:
+            data = handle.read()
+        if is_bdf_data(data):
+            return data, target
+    return None
+
+
+def ttf_of_bdf(data, source, name, em, places, then_unpack):
+    """Make the TrueType font of a BDF font. The chars of a font that is not of Unicode are
+    those of its codes in the code page."""
+    set_encoding(name or DEFAULT_ENCODING)
+    model, _sheet, cells = parse_bdf(data, lambda message: note("Warning: " + message),
+        shown(source), encoding if name else None, places)
+    unicode, page = model["unicode"], page_of(model)
+    family, bold, italic = bdf_family(model)
+    family = family or bdf_font_name(model) or os.path.splitext(os.path.basename(source))[0]
+    style = STYLES[(bold, italic)]
+    path = os.path.join(os.path.dirname(source), file_name(full_name(family, style)) + ".ttf")
+    check_backup(path)
+    if then_unpack:
+        check_backup(path + FILES_SUFFIX)
+    above, below = model["rows_above_baseline"], model["rows_below_baseline"]
+    blank = [[0] * usual_width(cells) for _y in range(above + below)]
+    bitmaps = {MISSING_GLYPH: cells[MISSING_GLYPH][1] if MISSING_GLYPH in cells else blank}
+    cmap, uncoded, left = {}, [], []
+    for key, (_width, rows) in cells.items():
+        code = bdf_code(key)
+        char = chr(code) if unicode and code is not None else (
+            page.char(code) if code is not None and code < 256 else None)
+        if code is None and key != MISSING_GLYPH:
+            left.append(key)
+        elif char is None and code is not None:
+            uncoded.append(key)
+        elif char is not None and ord(char) not in cmap:
+            cmap[ord(char)] = glyph_name(ord(char))
+            bitmaps[cmap[ord(char)]] = rows
+    if not unicode and page.nbsp_patched and NBSP not in cmap and SPACE in cmap:
+        cmap[NBSP] = cmap[SPACE]
+    if uncoded:
+        note("Warning: %s: the glyphs of %s have no char in %s; they are left out"
+            % (shown(source), bdf_keys_text(uncoded), page))
+    if left:
+        note("Warning: %s: the glyphs %s have no code; they are left out"
+            % (shown(source), ", ".join(left)))
+
+    values = dict(model["properties"] or [])
+
+    def number(key, default):
+        value = values.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+    names = made_names(family, style)
+    names.update({1: family, 2: style, 5: "Version 1.0"})
+    if isinstance(values.get("COPYRIGHT"), str) and values["COPYRIGHT"]:
+        names[0] = values["COPYRIGHT"]
+    size = em or above + below
+    info = {"label": "the font %r" % full_name(family, style), "names": names,
+        "units": min(PIXEL_UNITS, MAX_UNITS_PER_EM // size), "em": size,
+        "ascent": max(number("FONT_ASCENT", above), 0),
+        "descent": max(number("FONT_DESCENT", below), 0), "below": below, "line_gap": 0,
+        "underline": (number("UNDERLINE_POSITION", -1), number("UNDERLINE_THICKNESS", 1)),
+        "weight": 700 if bold else 400, "bold": bold, "italic": italic,
+        "average": max(round(number("AVERAGE_WIDTH", 0) / 10), 0),
+        "page": None if unicode else page}
+    made = make_ttf(info, list(bitmaps.items()), cmap)
+    back_up(path)
+    with open(path, "wb") as handle:
+        handle.write(made)
+    print("Made %s: the family %r, %s, %d chars, ascent %d; exact at %d pixels to the em, which"
+        " is %g points at 96 dpi, and at its multiples." % (shown(path), family, style,
+        len(cmap), info["ascent"], size, size * 72 / 96))
+    return unpack_file(path, page.name, page.patches) if then_unpack else 0
+
+
+def ttf(target, name, rows, em, aliases, patches, then_unpack):
+    need_fonttools()
+    if em is not None and em < 1:
+        die("--em must be 1 or more pixels")
+    pairs = parse_aliases(aliases) if aliases is not None else []
+    places = parse_patches(patches) if patches is not None else {}
+    if os.path.isfile(os.path.join(target, TTF_JSON)):
+        return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack)
+    found = None if is_bitmaps(target) or is_fnt(target) else bdf_source(target)
+    if found:
+        if rows is not None:
+            die(ROWS_MISPLACED)
+        if aliases is not None:
+            die("--aliases is for the fonts of a .fon file; a BDF font has its chars by its"
+                " codes")
+        return ttf_of_bdf(found[0], found[1], name, em, places, then_unpack)
+    fonts, source, report = fon_fonts(target, name, rows, "a TrueType")
     targets = ttf_targets(source, fonts)
     for path, _family, _style in targets:
         check_backup(path)
@@ -3293,6 +3442,810 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack):
             for (_header, chars, _size, _made, _count), (path, _family, _style)
             in zip(built, targets)]
     return max(statuses)
+
+
+# ----------------------------------------------------------------------------------------
+# BDF fonts
+
+
+def is_bdf_data(data):
+    return BDF_START.match(data) is not None
+
+
+def bdf_numbers(text, counts, where):
+    """The whole numbers of a line of a BDF file, as many as one of the counts."""
+    try:
+        numbers = [int(part) for part in text.split()]
+    except ValueError:
+        numbers = []
+    if len(numbers) not in counts:
+        die("%s: %r must be %s whole number(s)" % (where, text,
+            " or ".join("%d" % count for count in counts)))
+    return numbers
+
+
+def bdf_value(text, where):
+    """A value of a BDF property as bdf.json has it: a number, or the string in quotes."""
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        return text[1:-1].replace('""', '"')
+    try:
+        return int(text)
+    except ValueError:
+        die("%s: %r is neither a number nor a string in quotes" % (where, text))
+
+
+def bdf_value_text(value, where):
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "%d" % value
+    if isinstance(value, str) and "\n" not in value and "\r" not in value:
+        return '"%s"' % value.replace('"', '""')
+    die("%s: must be a number, or a string of one line" % where)
+
+
+def bdf_line(value, where):
+    """A text of bdf.json that a line of the file holds."""
+    if not isinstance(value, str) or "\n" in value or "\r" in value:
+        die("%s: must be a string of one line" % where)
+    return value
+
+
+def bdf_unicode(font, properties):
+    """Whether the codes of a BDF font are Unicode code points: whether its registry, as a
+    property or as the name of the font tells it, is ISO10646."""
+    registry = dict(properties or []).get("CHARSET_REGISTRY")
+    if not isinstance(registry, str):
+        fields = font.split("-")
+        registry = fields[-2] if len(fields) == 15 else ""
+    return registry.upper() == BDF_UNICODE
+
+
+def bdf_encoding(font, properties):
+    """The code page of the codes of a BDF font that is not of Unicode, as its registry and
+    its encoding name it, ISO8859-1 or microsoft-cp1251; None when Python has no codec of
+    that name."""
+    values = dict(properties or [])
+    fields = font.split("-")
+    registry, chars = (values.get(key, fields[at] if len(fields) == 15 else "")
+        for key, at in (("CHARSET_REGISTRY", -2), ("CHARSET_ENCODING", -1)))
+    for name in ("%s-%s" % (registry, chars), chars, registry):
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            return codecs.lookup(name).name
+        except LookupError:
+            continue
+    return None
+
+
+def bdf_key(code, unicode):
+    return code_key(code) if unicode else code
+
+
+def bdf_code(key):
+    """The code of a glyph by its key; None for a glyph that is kept by its name."""
+    if isinstance(key, int):
+        return key
+    return int(key[len(CODE_PREFIX):], 16) if key.startswith(CODE_PREFIX) else None
+
+
+def bdf_label(key):
+    """A key as bdf.json has it."""
+    return "%d" % key if isinstance(key, int) else key
+
+
+def bdf_codes(value, where, unicode):
+    if unicode:
+        return parse_hex_ranges(value, where)
+    return parse_ranges(value, where, 0, BDF_MAX_CODE, "the codes of a BDF font")
+
+
+def bdf_codes_text(codes, unicode):
+    return hex_ranges(codes) if unicode else ranges_text(codes)
+
+
+def bdf_keys_text(keys):
+    """The chars and the glyphs of some keys, for a message."""
+    codes = [key for key in keys if isinstance(key, int)]
+    others = [key for key in keys if not isinstance(key, int)]
+    return "; ".join(text for text in ("chars " + ranges_text(codes) if codes else "",
+        keys_text(others) if others else "") if text)
+
+
+def bdf_name_key(name, unicode):
+    """Whether a glyph without a code of its own may be kept by its name: one that cannot
+    be taken for a code."""
+    return bool(name) and not name.startswith(CODE_PREFIX) and (unicode or not name.isdigit())
+
+
+def bdf_sheet(codes, names, page, unicode):
+    """The rows of the bitmaps of a BDF font: of a Unicode font, the chars that the code page
+    has for the places 0..255 in those places, as of a TrueType font; of another, the codes
+    0..255 in their places. Then the other chars, then the glyphs without a code."""
+    if unicode:
+        return ttf_sheet(codes, names, page)
+    return placed_sheet(dict((code, code) for code in codes if code < 256), sorted(codes),
+        names)
+
+
+def bdf_missing_place(codes, names, page, unicode):
+    """Whether the glyph of a missing char is in the place of the default char."""
+    if unicode:
+        return missing_place(codes, names, page)
+    return MISSING_GLYPH in names and NEW_DEFAULT_CHAR not in codes
+
+
+def bdf_swidth(advance, size):
+    """The SWIDTH line of a glyph: its advance in thousandths of the em, which is the point
+    size of the font at its horizontal resolution."""
+    scale = size[0] * size[1]
+    return "%d 0" % (math.floor(advance * 72000 / scale + 0.5) if scale > 0 else 0)
+
+
+def ink_box(ink):
+    """The box of the pixels of ink, as BBX has it: width, height, left, bottom."""
+    if not ink:
+        return [0, 0, 0, 0]
+    xs, ys = [x for x, _y in ink], [y for _x, y in ink]
+    return [max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, min(xs), min(ys)]
+
+
+def bdf_bounds(boxes):
+    """FONTBOUNDINGBOX of glyphs: the box that holds their boxes, those of no pixels aside."""
+    boxes = [box for box in boxes if box[0] and box[1]]
+    if not boxes:
+        return [0, 0, 0, 0]
+    left, bottom = min(box[2] for box in boxes), min(box[3] for box in boxes)
+    return [max(box[0] + box[2] for box in boxes) - left,
+        max(box[1] + box[3] for box in boxes) - bottom, left, bottom]
+
+
+def bdf_holds(outer, inner):
+    """Whether a box holds another one; one of no pixels is held by any."""
+    if not inner[0] or not inner[1]:
+        return True
+    return outer[2] <= inner[2] and outer[3] <= inner[3] and (
+        inner[0] + inner[2] <= outer[0] + outer[2]) and inner[1] + inner[3] <= outer[1] + outer[3]
+
+
+def bdf_rows(ink, box):
+    """The rows of the bitmap of a glyph, top first: the pixels of its box in hex, each row
+    padded to whole bytes."""
+    width, height, left, bottom = box
+    size = (width + 7) // 8
+    out = []
+    for y in range(bottom + height - 1, bottom - 1, -1):
+        value = 0
+        for x in range(left, left + width):
+            value = value << 1 | ((x, y) in ink)
+        out.append("%0*X" % (size * 2, value << (size * 8 - width)) if size else "")
+    return out
+
+
+def bdf_family(model):
+    """The family of a BDF font, or None, and whether it is bold and italic, as its
+    properties tell them, or else its name."""
+    values = dict(model["properties"] or [])
+    fields = model["font"].split("-")
+    if len(fields) != 15:
+        fields = [""] * 15
+    family, weight, slant = (values[key] if isinstance(values.get(key), str) else fields[at]
+        for key, at in (("FAMILY_NAME", 2), ("WEIGHT_NAME", 3), ("SLANT", 4)))
+    return family.strip() or None, "bold" in weight.lower(), slant.upper() in ("I", "O")
+
+
+def bdf_font_name(model):
+    """The name of a BDF font: its face name, or its family and style; None when the font
+    tells neither."""
+    face = dict(model["properties"] or []).get("FACE_NAME")
+    if isinstance(face, str) and face.strip():
+        return face.strip()
+    family, bold, italic = bdf_family(model)
+    return full_name(family, STYLES[(bold, italic)]) if family else None
+
+
+def bdf_legend(page):
+    """The char, or None, and the code of a key, for the SVG picture of the bitmaps."""
+    def legend(key):
+        if isinstance(key, int):
+            return page.char(key) if key < 256 else None, "%02X" % key
+        if key.startswith(CODE_PREFIX):
+            return chr(int(key[len(CODE_PREFIX):], 16)), key[len(CODE_PREFIX):]
+        return None, key
+    return legend
+
+
+def bdf_lines(data):
+    """The lines of a BDF file as text, and the encoding that its texts are in."""
+    for name in BDF_TEXT_ENCODINGS:
+        try:
+            text = data.decode(name)
+            break
+        except UnicodeError:
+            continue
+    lines = text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines], name
+
+
+def read_bdf(data, warn, where):
+    """The lines of a BDF file as the header, its properties and the glyphs."""
+    lines, text_encoding = bdf_lines(data)
+    if b"\r\n" in data:
+        warn("%s: its lines end in CR LF; packing ends them in LF" % where)
+    header = {"before": [], "comments": [], "text_encoding": text_encoding}
+    properties, at = None, 0
+
+    def place(index):
+        return "%s:%d" % (where, index + 1)
+
+    def take():
+        """The keyword and the rest of the next line, and where it is."""
+        nonlocal at
+        if at >= len(lines):
+            die("%s: ends before ENDFONT" % where)
+        at += 1
+        return BDF_LINE.match(lines[at - 1]).groups() + (place(at - 1),)
+
+    while True:
+        keyword, rest, here = take()
+        if keyword == "STARTFONT":
+            header["version"] = rest
+            break
+        if keyword == "COMMENT":
+            header["before"].append(rest)
+        elif keyword:
+            die("%s: a BDF file begins with STARTFONT, after comments if any" % here)
+    while True:
+        keyword, rest, here = take()
+        if keyword == "CHARS":
+            count = bdf_numbers(rest, (1,), here)[0]
+            break
+        if keyword == "COMMENT":
+            header["comments"].append(rest)
+        elif (keyword in ("FONT", "SIZE", "FONTBOUNDINGBOX") and keyword in header) or (
+                keyword == "STARTPROPERTIES" and properties is not None):
+            die("%s: a second %s" % (here, keyword))
+        elif keyword == "FONT":
+            header[keyword] = rest
+        elif keyword in ("SIZE", "FONTBOUNDINGBOX"):
+            header[keyword] = bdf_numbers(rest, (3, 4) if keyword == "SIZE" else (4,), here)
+        elif keyword == "STARTPROPERTIES":
+            stated, properties = bdf_numbers(rest, (1,), here)[0], []
+            while True:
+                keyword, rest, here = take()
+                if keyword == "ENDPROPERTIES":
+                    break
+                if keyword == "COMMENT":
+                    header["comments"].append(rest)
+                elif keyword:
+                    properties.append([keyword, bdf_value(rest.strip(), here)])
+            if stated != len(properties):
+                warn("%s: STARTPROPERTIES says %d, but %d properties follow; packing writes"
+                    " how many there are" % (where, stated, len(properties)))
+        elif keyword == "METRICSSET" and bdf_numbers(rest, (1,), here) == [0]:
+            warn("%s: METRICSSET 0, which is what a font without it has, is dropped" % here)
+        elif keyword:
+            die("%s: %s is not supported, nor is any font for vertical writing" % (here, keyword))
+    for keyword in ("FONT", "SIZE", "FONTBOUNDINGBOX"):
+        if keyword not in header:
+            die("%s: has no %s" % (where, keyword))
+    if len(header["SIZE"]) == 4 and header["SIZE"][3] != 1:
+        die("%s: SIZE says %d bits to a pixel; only fonts of 1 are supported"
+            % (where, header["SIZE"][3]))
+
+    glyphs, dropped = [], 0
+    while True:
+        keyword, rest, here = take()
+        if keyword == "ENDFONT":
+            break
+        if keyword == "COMMENT":
+            dropped += 1
+            continue
+        if not keyword:
+            continue
+        if keyword != "STARTCHAR":
+            die("%s: %s, where STARTCHAR or ENDFONT is expected" % (here, keyword))
+        glyph = {"name": rest, "where": here, "rows": []}
+        while True:
+            keyword, rest, here = take()
+            if keyword == "BITMAP":
+                break
+            if keyword in BDF_OVERRIDES[1:] + ("DWIDTH",):
+                if keyword in glyph:
+                    die("%s: a second %s" % (here, keyword))
+                glyph[keyword] = rest
+            elif keyword == "COMMENT":
+                dropped += 1
+            elif keyword:
+                die("%s: %s is not supported, nor is any font for vertical writing"
+                    % (here, keyword))
+        while True:
+            keyword, rest, here = take()
+            if keyword == "ENDCHAR":
+                break
+            glyph["rows"].append(lines[at - 1].strip())
+        glyphs.append(glyph)
+    if dropped:
+        warn("%s: %d comment(s) among the glyphs are dropped" % (where, dropped))
+    if any(line.strip() for line in lines[at:]):
+        warn("%s: what follows ENDFONT is dropped" % where)
+    if count != len(glyphs):
+        warn("%s: CHARS says %d, but %d glyphs follow; packing writes how many there are"
+            % (where, count, len(glyphs)))
+    return header, properties, glyphs
+
+
+def parse_bdf(data, warn, where, chars_encoding=None, patches=None):
+    """A BDF font as the object that bdf.json stores, the sheet of its bitmaps, and their
+    cells by the keys of the sheet. The code page, with its patches, is that of the places
+    0..255 of the sheet of a Unicode font, and names the chars of the codes of another;
+    without one given, the font tells it, or it is the default one."""
+    header, properties, glyphs = read_bdf(data, warn, where)
+    unicode = bdf_unicode(header["FONT"], properties)
+    used, records, cut, taken = set(), [], [], []
+    for glyph in glyphs:
+        here = "%s: the glyph %r" % (glyph["where"], glyph["name"])
+        for keyword in ("ENCODING", "DWIDTH", "BBX"):
+            if keyword not in glyph:
+                die("%s has no %s" % (here, keyword))
+        codes = bdf_numbers(glyph["ENCODING"], (1, 2), here + ", ENCODING")
+        advance, rise = bdf_numbers(glyph["DWIDTH"], (2,), here + ", DWIDTH")
+        if rise or advance < 0:
+            die("%s: DWIDTH %s is not supported: the advance must go right, or nowhere"
+                % (here, glyph["DWIDTH"]))
+        width, height, left, bottom = bdf_numbers(glyph["BBX"], (4,), here + ", BBX")
+        if width < 0 or height < 0:
+            die("%s: BBX %s has a size below 0" % (here, glyph["BBX"]))
+        if len(glyph["rows"]) != height:
+            die("%s has %d row(s) of bitmap, where BBX says %d"
+                % (here, len(glyph["rows"]), height))
+        ink = set()
+        for r, row in enumerate(glyph["rows"]):
+            if not re.fullmatch("[0-9A-Fa-f]*", row) or len(row) * 4 < width:
+                die("%s: the row %d of its bitmap, %r, is not %d bits in hex"
+                    % (here, r + 1, row, width))
+            value, bits = int(row or "0", 16), len(row) * 4
+            ink.update((left + x, bottom + height - 1 - r) for x in range(width)
+                if value >> (bits - 1 - x) & 1)
+
+        key = None
+        if codes[0] >= 0 and len(codes) == 1:
+            if unicode and codes[0] > 0x10FFFF:
+                die("%s: ENCODING %d is past the last Unicode char" % (here, codes[0]))
+            key = bdf_key(codes[0], unicode)
+            if key in used:
+                taken.append(glyph["name"])
+                key = None
+        if key is None:
+            key = glyph["name"]
+            if key in used or not bdf_name_key(key, unicode):
+                die("%s has no code of its own, and its name cannot stand for it: such a"
+                    " glyph is kept by its name, which must be another than those of the"
+                    " others, and not one of a code" % here)
+            if not advance:
+                die("%s has no code of its own, and no width, which is not supported" % here)
+        used.add(key)
+        inside = set((x, y) for x, y in ink if 0 <= x < advance)
+        if inside != ink:
+            cut.append(key)
+        records.append(dict(glyph, key=key, advance=advance, ink=inside))
+    if taken:
+        warn("%s: these glyphs have the codes of glyphs before them, and are kept by their"
+            " names: %s" % (where, ", ".join(taken)))
+    if cut:
+        warn("%s: wider than their advance, and cut to it: %s" % (where, bdf_keys_text(cut)))
+
+    # A cell holds the line of the font, and all the ink that goes beyond it.
+    values, box = dict(properties or []), header["FONTBOUNDINGBOX"]
+    ascent, descent = values.get("FONT_ASCENT"), values.get("FONT_DESCENT")
+    if not isinstance(ascent, int) or not isinstance(descent, int):
+        ascent, descent = box[1] + box[3], -box[3]
+    rows = [y for record in records for _x, y in record["ink"]]
+    above = max([ascent, 0] + [y + 1 for y in rows])
+    below = max([descent, 0] + [-y for y in rows])
+    above = max(above, 1 - below)
+    cells = dict((record["key"], (record["advance"], [[int((x, y) in record["ink"])
+        for x in range(record["advance"])] for y in range(above - 1, -below - 1, -1)]))
+        for record in records if record["advance"])
+    if not cells:
+        die("%s has no glyph of any width" % where)
+
+    coded = [(record, bdf_code(record["key"])) for record in records
+        if bdf_code(record["key"]) is not None]
+    names = max(BDF_NAME_FORMATS if unicode else BDF_NAME_FORMATS[::-1], key=lambda form: sum(
+        record["name"] == form % code for record, code in coded))
+    size = header["SIZE"]
+    stated = set(record.get("SWIDTH") for record in records)
+    swidth = stated.pop() if len(stated) == 1 else None
+    if swidth is not None and all(swidth == bdf_swidth(record["advance"], size)
+            for record in records):
+        swidth = None
+    overrides = {}
+    for record in records:
+        code = bdf_code(record["key"])
+        made = {"STARTCHAR": names % code if code is not None else record["name"],
+            "ENCODING": "%d" % code if code is not None else "-1",
+            "SWIDTH": swidth if swidth is not None else bdf_swidth(record["advance"], size),
+            "BBX": " ".join("%d" % number for number in ink_box(record["ink"]))}
+        given = dict((field, record.get(field)) for field in BDF_OVERRIDES[1:])
+        given["STARTCHAR"] = record["name"]
+        differ = dict((field, given[field]) for field in BDF_OVERRIDES
+            if given[field] != made[field])
+        if differ:
+            overrides[bdf_label(record["key"])] = differ
+
+    if chars_encoding:
+        page = CodePage(chars_encoding, patches)
+    else:
+        page = CodePage((None if unicode else bdf_encoding(header["FONT"], properties))
+            or DEFAULT_ENCODING, patches)
+    chars = set(bdf_code(key) for key in cells if bdf_code(key) is not None)
+    zero = set(bdf_code(record["key"]) for record in records if not record["advance"])
+    extra = [record["key"] for record in records if bdf_code(record["key"]) is None]
+    model = {}
+    if header["before"]:
+        model["comments_before_startfont"] = header["before"]
+    model.update({
+        "version": header["version"],
+        "comments": header["comments"],
+        "font": header["FONT"],
+        "size": size,
+        "font_bounding_box": None if box == bdf_bounds([bdf_numbers(record["BBX"], (4,), "")
+            for record in records]) else box,
+        "properties": properties,
+        "rows_above_baseline": above,
+        "rows_below_baseline": below,
+        "png": None,
+        "txt": None,
+        "text_encoding": header["text_encoding"],
+        "unicode": unicode,
+        "codepage": page.name,
+        "codepage_patches": page.patches_json(),
+        "chars": bdf_codes_text(chars, unicode),
+        "zero_width": bdf_codes_text(zero, unicode),
+        "glyphs": extra,
+        "glyph_names": names,
+        "swidth": swidth,
+        "overrides": overrides,
+    })
+    return model, bdf_sheet(chars, extra, page, unicode), cells
+
+
+def build_bdf(model, load, warn):
+    """The BDF file of the object of bdf.json, and of the bitmaps that load gives: the rows
+    of the glyphs of the sheet, by the bitmap files named, the height of the cells and the
+    key of the cell that may be without paper."""
+    top = Fields(model, BDF_JSON)
+    before = [bdf_line(text, "comments_before_startfont")
+        for text in top.take_list("comments_before_startfont", [])]
+    version = bdf_line(top.take("version"), "version")
+    comments = [bdf_line(text, "comments") for text in top.take_list("comments")]
+    font = bdf_line(top.take("font"), "font")
+    size = top.take_list("size")
+    if len(size) not in (3, 4) or not all(isinstance(number, int)
+            and not isinstance(number, bool) for number in size) or size[3:] not in ([], [1]):
+        die("size: must be the point size and the two resolutions, and 1 bit to a pixel if"
+            " the fourth number is there")
+    stated = top.take("font_bounding_box")
+    if stated is not None and (not isinstance(stated, list) or len(stated) != 4
+            or not all(isinstance(number, int) and not isinstance(number, bool)
+            for number in stated)):
+        die("font_bounding_box: must be null, or four whole numbers")
+    properties = top.take("properties")
+    if properties is not None and not isinstance(properties, list):
+        die("properties: must be null, or a list of names, each with its value")
+    for index, pair in enumerate(properties or []):
+        here = "properties[%d]" % index
+        if not isinstance(pair, list) or len(pair) != 2 or not isinstance(pair[0], str) or (
+                not re.fullmatch("[^\\s\"]+", pair[0])):
+            die("%s: must be a name and its value, as [\"FONT_ASCENT\", 12]" % here)
+        bdf_value_text(pair[1], here)
+    above = whole_number(top, "rows_above_baseline", -255, 4096)
+    below = whole_number(top, "rows_below_baseline", -255, 4096)
+    if above + below < 1:
+        die("rows_above_baseline and rows_below_baseline must make a cell of 1 row or more")
+    files = (top.take("png"), top.take("txt"))
+    text_encoding = top.take("text_encoding")
+    try:
+        text_encoding = codecs.lookup(text_encoding).name
+    except (LookupError, TypeError):
+        die("text_encoding: there is no encoding named %r" % (text_encoding,))
+    unicode = top.take("unicode")
+    if not isinstance(unicode, bool):
+        die("unicode: must be true or false")
+    page = json_page(top.take("codepage"), top.take("codepage_patches"))
+    chars = bdf_codes(top.take("chars"), "chars", unicode)
+    zero = bdf_codes(top.take("zero_width"), "zero_width", unicode)
+    extra = top.take_list("glyphs")
+    if any(not isinstance(name, str) or not bdf_name_key(name, unicode) or "\n" in name
+            for name in extra) or len(set(extra)) != len(extra):
+        die("glyphs: must be a list of the names of the glyphs without a code, each another,"
+            " and none of them one of a code")
+    names = top.take("glyph_names")
+    if not isinstance(names, str) or not BDF_NAME_FORMAT.fullmatch(names):
+        die("glyph_names: must be the name of a glyph with its code in it, as uni%04X or"
+            " char%d")
+    swidth = top.take("swidth")
+    if swidth is not None:
+        bdf_line(swidth, "swidth")
+    overrides = top.take("overrides")
+    if not isinstance(overrides, dict) or not all(isinstance(fields, dict)
+            for fields in overrides.values()):
+        die("overrides: must be an object of glyphs, each with the lines that it has"
+            " otherwise than packing makes them")
+    top.done()
+
+    sheet = bdf_sheet(chars, extra, page, unicode)
+    if not sheet:
+        die("%s: chars and glyphs name no glyph of pixels" % BDF_JSON)
+    if chars & zero:
+        die("%s: %s are listed both in chars and in zero_width"
+            % (BDF_JSON, bdf_codes_text(chars & zero, unicode)))
+    bare = MISSING_GLYPH if bdf_missing_place(chars, extra, page, unicode) else None
+    cells = dict(zip(sheet_keys(sheet), load(files, sheet, above + below, bare)))
+
+    glyphs, boxes, inks = [], [], []
+    for key in [bdf_key(code, unicode) for code in sorted(chars | zero)] + extra:
+        code, label = bdf_code(key), bdf_label(key)
+        where = "overrides.%s" % label
+        fields = Fields(overrides.pop(label, {}), where)
+        if code is None and "STARTCHAR" in fields.left:
+            die("%s.STARTCHAR: a glyph without a code is named in glyphs" % where)
+        rows = cells.get(key, [])
+        advance = len(rows[0]) if rows else 0
+        name = bdf_line(fields.take("STARTCHAR", key if code is None else names % code),
+            where + ".STARTCHAR")
+        encoding_text = bdf_line(fields.take("ENCODING", "-1" if code is None else "%d" % code),
+            where + ".ENCODING")
+        width_text = fields.take("SWIDTH", swidth or bdf_swidth(advance, size))
+        if width_text is not None:
+            bdf_line(width_text, where + ".SWIDTH")
+        box_text = fields.take("BBX", None)
+        fields.done()
+        ink = set((x, above - 1 - y) for y, row in enumerate(rows) for x, bit in enumerate(row)
+            if bit)
+        tight = ink_box(ink)
+        box = tight
+        if box_text is None:
+            box_text = " ".join("%d" % number for number in tight)
+        else:
+            box = bdf_numbers(bdf_line(box_text, where + ".BBX"), (4,), where + ".BBX")
+            if box[0] < 0 or box[1] < 0 or not bdf_holds(box, tight):
+                die("%s.BBX: %s does not hold the ink of the glyph, which takes %s"
+                    % (where, box_text, " ".join("%d" % number for number in tight)))
+        boxes.append(box)
+        inks.append(tight)
+        glyphs += ["STARTCHAR " + name, "ENCODING " + encoding_text]
+        if width_text is not None:
+            glyphs.append("SWIDTH " + width_text)
+        glyphs += ["DWIDTH %d 0" % advance, "BBX " + box_text, "BITMAP"] + bdf_rows(ink, box)
+        glyphs.append("ENDCHAR")
+    if overrides:
+        die("overrides: %s, which are no glyphs of the font" % ", ".join(sorted(overrides)))
+    if stated is None:
+        stated = bdf_bounds(boxes)
+    elif not bdf_holds(stated, bdf_bounds(inks)):
+        warn("%s: font_bounding_box is %s, which does not hold the ink of every glyph: that"
+            " takes %s" % (BDF_JSON, " ".join("%d" % number for number in stated),
+            " ".join("%d" % number for number in bdf_bounds(inks))))
+
+    lines = ["COMMENT " + text if text else "COMMENT" for text in before]
+    lines += ["STARTFONT " + version] + ["COMMENT " + text if text else "COMMENT"
+        for text in comments]
+    lines += ["FONT " + font, "SIZE " + " ".join("%d" % number for number in size),
+        "FONTBOUNDINGBOX " + " ".join("%d" % number for number in stated)]
+    if properties is not None:
+        lines += ["STARTPROPERTIES %d" % len(properties)] + ["%s %s" % (name,
+            bdf_value_text(value, name)) for name, value in properties] + ["ENDPROPERTIES"]
+    lines += ["CHARS %d" % len(boxes)] + glyphs + ["ENDFONT"]
+    try:
+        return ("\n".join(lines) + "\n").encode(text_encoding)
+    except UnicodeError:
+        die("%s: has a text with a char that %s lacks; text_encoding names the encoding of"
+            " the file" % (BDF_JSON, text_encoding))
+
+
+def bdf_listed(keys):
+    return ", ".join(sorted(bdf_label(key) for key in keys))
+
+
+def build_bdf_from(directory, warn):
+    """The BDF file that the files in the directory describe."""
+    return build_bdf(load_json(os.path.join(directory, BDF_JSON)),
+        lambda files, sheet, height, bare: load_glyphs(directory, files, sheet, set(), height,
+        None, BDF_JSON, bdf_listed, bare)[1], warn)
+
+
+def write_bdf_files(directory, model, sheet, cells, fallback):
+    """Write the files of a BDF font into a new directory. The bitmap files are named after
+    the font, or after the fallback when it has no name."""
+    page, unicode = page_of(model), model["unicode"]
+    bare = bare_cell(cells, MISSING_GLYPH if bdf_missing_place(
+        bdf_codes(model["chars"], "chars", unicode), model["glyphs"], page, unicode)
+        else None, usual_width(cells))
+    write_cell_files(directory, BDF_JSON, model, sheet, cells,
+        file_name(bdf_font_name(model) or fallback), bare, bdf_legend(page))
+
+
+def first_difference(one, other):
+    """The number of the first line that two files differ in, and that line of each, or
+    None for one that has no such line."""
+    ones, others = one.split(b"\n"), other.split(b"\n")
+    at = next((at for at, (line, twin) in enumerate(zip(ones, others)) if line != twin),
+        min(len(ones), len(others)))
+    return (at + 1,) + tuple(lines[at].decode("latin-1") if at < len(lines) else None
+        for lines in (ones, others))
+
+
+def unpack_bdf(path, data, chars_encoding, patches):
+    directory = path + FILES_SUFFIX
+    report = Report()
+    model, sheet, cells = parse_bdf(data, report.warning, shown(path), chars_encoding,
+        patches)
+    write_bdf_files(directory, model, sheet, cells,
+        os.path.splitext(os.path.basename(path))[0])
+    count = len(cells) + len(bdf_codes(model["zero_width"], "zero_width", model["unicode"]))
+    print("Unpacked %s into %s: %d glyph(s), %s; a cell is %d pixels high."
+        % (shown(path), shown_directory(directory), count,
+        "with the chars of %s in the places 0..255" % page_of(model) if model["unicode"]
+        else "of the codes of %s" % page_of(model),
+        model["rows_above_baseline"] + model["rows_below_baseline"]))
+
+    # The files just written are packed again, in memory: that finds what packing refuses,
+    # and whether the original comes back.
+    exact = False
+    try:
+        packed = build_bdf_from(directory, report.warning)
+        exact = packed == data
+        if not exact:
+            report.warning("packing these files gives a file that differs from the original,"
+                " first at line %d, which is %r there and %r in what packing makes"
+                % first_difference(data, packed))
+    except Failure as failure:
+        report.error("packing these files will be refused. %s" % failure)
+        for problem in failure.problems:
+            note("  " + problem)
+    if report.errors or report.warnings:
+        print("%d error(s), %d warning(s)." % (report.errors, report.warnings))
+    if exact:
+        print("Packing these files gives the original file back, byte for byte.")
+    return 1 if report.errors else 0
+
+
+def bdf_of_font(font, widths, glyphs, page, family, style):
+    """The bdf.json object of a Unicode BDF font of one font of a .fon file, and its cells,
+    of the chars that the code page gives the codes, and the glyph of a missing char."""
+    header = font["header"]
+    height, ascent, first = header["dfPixHeight"], header["dfAscent"], header["dfFirstChar"]
+    default = header["dfDefaultChar"]
+    cells = {}
+    if default < len(glyphs) and widths[default]:
+        cells[MISSING_GLYPH] = (widths[default], glyphs[default])
+    for code, rows, width in zip(range(first, first + len(glyphs)), glyphs, widths):
+        char = page.char(code)
+        if width and char is not None and code_key(ord(char)) not in cells:
+            cells[code_key(ord(char))] = (width, rows)
+    # NBSP, when a patch has taken its place, shows the glyph of the space.
+    if page.nbsp_patched and code_key(NBSP) not in cells and code_key(SPACE) in cells:
+        cells[code_key(NBSP)] = cells[code_key(SPACE)]
+    bold, italic = style.startswith("Bold"), style.endswith("Italic")
+    used = [width for width, _rows in cells.values()]
+    average = round(10 * sum(used) / len(used))
+    spacing = "C" if len(set(used)) == 1 else "P"
+    points, across, down = header["dfPoints"], header["dfHorizRes"], header["dfVertRes"]
+    weight, slant = "Bold" if bold else "Medium", "I" if italic else "R"
+    properties = [["FAMILY_NAME", family], ["WEIGHT_NAME", weight], ["SLANT", slant],
+        ["SETWIDTH_NAME", "Normal"], ["ADD_STYLE_NAME", ""], ["PIXEL_SIZE", height],
+        ["POINT_SIZE", points * 10], ["RESOLUTION_X", across], ["RESOLUTION_Y", down],
+        ["SPACING", spacing], ["AVERAGE_WIDTH", average], ["CHARSET_REGISTRY", BDF_UNICODE],
+        ["CHARSET_ENCODING", "1"], ["FONT_ASCENT", ascent], ["FONT_DESCENT", height - ascent],
+        ["FACE_NAME", full_name(family, style)]]
+    copyright = header["dfCopyright"]
+    if copyright and not copyright.startswith("hex:"):
+        properties.append(["COPYRIGHT", copyright])
+    chars = set(bdf_code(key) for key in cells if key != MISSING_GLYPH)
+    model = {
+        "version": "2.1",
+        "comments": [],
+        "font": "--%s-%s-%s-Normal--%d-%d-%d-%d-%s-%d-%s-1" % (family.replace("-", " "),
+            weight, slant, height, points * 10, across, down, spacing, average, BDF_UNICODE),
+        "size": [points, across, down],
+        "font_bounding_box": None,
+        "properties": properties,
+        "rows_above_baseline": ascent,
+        "rows_below_baseline": height - ascent,
+        "png": None,
+        "txt": None,
+        "text_encoding": "utf-8",
+        "unicode": True,
+        "codepage": page.name,
+        "codepage_patches": page.patches_json(),
+        "chars": hex_ranges(chars),
+        "zero_width": "",
+        "glyphs": [MISSING_GLYPH] if MISSING_GLYPH in cells else [],
+        "glyph_names": BDF_NAME_FORMATS[0],
+        "swidth": None,
+        "overrides": {},
+    }
+    return model, cells
+
+
+def bdf(target, name, rows, patches, then_unpack):
+    """Make the BDF font of the files that unpack wrote of one, or a Unicode BDF font of
+    each font of a .fon file, of the directory that unpack made of one, of bitmaps alone or
+    of a .fnt file."""
+    directory = target.rstrip("/\\")
+    if os.path.isfile(os.path.join(directory, TTF_JSON)):
+        die("%s holds a TrueType font; a BDF font is not made of one"
+            % shown_directory(directory))
+    if os.path.isfile(os.path.join(directory, BDF_JSON)):
+        return bdf_of_files(directory, name, rows, patches, then_unpack)
+    places = parse_patches(patches) if patches is not None else {}
+    if not is_bitmaps(target) and not is_fnt(target) and os.path.isfile(target):
+        with open(target, "rb") as handle:
+            if is_bdf_data(handle.read()):
+                die("%s is a BDF font already; unpack it, and bdf makes it again of the files"
+                    % shown(target))
+    fonts, source, report = fon_fonts(target, name, rows, "a BDF")
+    targets = ttf_targets(source, fonts, ".bdf")
+    for path, _family, _style in targets:
+        check_backup(path)
+        if then_unpack:
+            check_backup(path + FILES_SUFFIX)
+
+    def warn(message):
+        note("Warning: " + message)
+
+    built = []
+    for (font, widths, glyphs, _where), (_path, family, style) in zip(fonts, targets):
+        header = font["header"]
+        chars = CodePage(encoding if name
+            else CHARSET_ENCODINGS.get(header["dfCharSet"], encoding), places)
+        model, cells = bdf_of_font(font, widths, glyphs, chars, family, style)
+        made = build_bdf(model, lambda _files, sheet, _height, _bare: [cells[key][1]
+            for key in sheet_keys(sheet)], warn)
+        built.append((header, chars, made, len(cells)))
+        uncoded = uncoded_chars(font, widths, glyphs, chars)
+        if uncoded:
+            warn("the font %r: the glyphs at %s are drawn, but have no char in %s; they are"
+                " left out" % (full_name(family, style), uncoded, chars))
+    for (header, chars, made, count), (path, family, style) in zip(built, targets):
+        back_up(path)
+        with open(path, "wb") as handle:
+            handle.write(made)
+        print("Made %s: the family %r, %s, %d glyph(s) of the chars by %s, %d pixels high,"
+            " ascent %d." % (shown(path), family, style, count, chars, header["dfPixHeight"],
+            header["dfAscent"]))
+    if report.errors:
+        note("%s has %d error(s), so its fonts may be damaged; unpack tells what they are"
+            % (shown(target), report.errors))
+    statuses = [1 if report.errors else 0]
+    if then_unpack:
+        statuses += [unpack_file(path, chars.name, chars.patches)
+            for (_header, chars, _made, _count), (path, _family, _style)
+            in zip(built, targets)]
+    return max(statuses)
+
+
+def bdf_of_files(directory, name, rows, patches, then_unpack):
+    """Make the BDF font of the files that unpack wrote of one."""
+    if then_unpack:
+        die(UNPACK_MISPLACED % shown_directory(directory))
+    if rows is not None:
+        die(ROWS_MISPLACED)
+    for option, given in (("codepage", name), ("codepage-patches", patches)):
+        if given is not None:
+            die("--%s is not for %s: %s there tells it"
+                % (option, shown_directory(directory), BDF_JSON))
+    path = fon_path_of(directory)
+    check_backup(path)
+    data = build_bdf_from(directory, lambda message: note("Warning: " + message))
+    back_up(path)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    print("Made %s of %s." % (shown(path), shown_directory(directory)))
+    return 0
 
 
 # ----------------------------------------------------------------------------------------
@@ -3520,6 +4473,67 @@ def alter_ttf(directory, change, warn):
     return model, sheet, cells, new if new != old else None
 
 
+def alter_bdf(directory, change, warn):
+    """The bdf.json object, the sheet and the cells of the font of a directory, changed, and
+    the new size of the font as a name has it, when it is another than it was. The boxes
+    are made anew, of the ink."""
+    build_bdf_from(directory, lambda _message: None)
+    model = load_json(os.path.join(directory, BDF_JSON))
+    unicode, page = model["unicode"], page_of(model)
+    chars = bdf_codes(model["chars"], "chars", unicode)
+    height = model["rows_above_baseline"] + model["rows_below_baseline"]
+    sheet = bdf_sheet(chars, model["glyphs"], page, unicode)
+    widths, bitmaps = load_glyphs(directory, (model["png"], model["txt"]), sheet, set(),
+        height, None, BDF_JSON, bdf_listed,
+        MISSING_GLYPH if bdf_missing_place(chars, model["glyphs"], page, unicode) else None)
+
+    def size_of(glyphs):
+        sizes = set(len(glyph[0]) for glyph in glyphs)
+        return " %s%dpx" % ("%dx" % sizes.pop() if len(sizes) == 1 else "", height)
+
+    old = size_of(bitmaps)
+    cells = dict((key, (len(glyph[0]), glyph)) for key, glyph
+        in zip(sheet_keys(sheet), (change.glyph(glyph) for glyph in bitmaps)))
+    new_widths = [width for width, _glyph in cells.values()]
+    new = size_of([glyph for _width, glyph in cells.values()])
+    model["font_bounding_box"] = None
+    for label, fields in list(model["overrides"].items()):
+        fields.pop("BBX", None)
+        if not fields:
+            del model["overrides"][label]
+
+    # The name of the font, and the properties of its style and width, as XLFD has them.
+    properties = model["properties"] or []
+    fields = model["font"].split("-")
+    named = len(fields) == 15
+    _family, was_bold, was_italic = bdf_family(model)
+    for does, said, what in ((change.bold, was_bold, "bold"),
+            (change.italic, was_italic, "italic")):
+        if does and said:
+            warn("%s: the font is %s already" % (BDF_JSON, what))
+    average = (round(10 * sum(widths) / len(widths)), round(10 * sum(new_widths) / len(widths)))
+    changed = {"WEIGHT_NAME": "Bold" if change.bold else None,
+        "SLANT": "I" if change.italic else None}
+    for pair in properties:
+        if pair[0] in ("FAMILY_NAME", "FACE_NAME") and isinstance(pair[1], str):
+            pair[1] = resized(pair[1], old, new, change.word)
+        elif changed.get(pair[0]) and isinstance(pair[1], str) and (
+                pair[1].lower() not in ("bold", "i", "o")):
+            pair[1] = changed[pair[0]]
+        elif pair[0] == "AVERAGE_WIDTH" and pair[1] == average[0]:
+            pair[1] = average[1]
+    if named:
+        fields[2] = resized(fields[2], old, new, change.word)
+        if change.bold and "bold" not in fields[3].lower():
+            fields[3] = "Bold"
+        if change.italic and fields[4].upper() not in ("I", "O"):
+            fields[4] = "I"
+        if fields[12] == "%d" % average[0]:
+            fields[12] = "%d" % average[1]
+        model["font"] = "-".join(fields)
+    return model, sheet, cells, new if new != old else None
+
+
 def unpack_into(path, directory, name, warn):
     """Write the files of a font file into a directory, as unpack does, without its report."""
     set_encoding(name or DEFAULT_ENCODING)
@@ -3528,6 +4542,11 @@ def unpack_into(path, directory, name, warn):
     if data[:4] in SFNT_MAGICS:
         model, sheet, cells = parse_ttf(data, warn, shown(path), encoding if name else None)
         write_ttf_files(directory, model, sheet, cells,
+            os.path.splitext(os.path.basename(path))[0])
+        return
+    if is_bdf_data(data):
+        model, sheet, cells = parse_bdf(data, warn, shown(path), encoding if name else None)
+        write_bdf_files(directory, model, sheet, cells,
             os.path.splitext(os.path.basename(path))[0])
         return
     report = Report(quiet=True)
@@ -3565,8 +4584,11 @@ def alter_directory(directory, name, change, home, source, warn):
     of them beside it. source is what a message calls that which is changed."""
     root, extension = os.path.splitext(os.path.basename(fon_path_of(directory)))
     truetype = os.path.isfile(os.path.join(directory, TTF_JSON))
+    bitmap = os.path.isfile(os.path.join(directory, BDF_JSON))
     if truetype:
         model, sheet, cells, size = alter_ttf(directory, change, warn)
+    elif bitmap:
+        model, sheet, cells, size = alter_bdf(directory, change, warn)
     else:
         data, size = alter_fon(directory, name, change, warn)
     font = os.path.join(home, changed_name(root, change, size) + extension)
@@ -3576,6 +4598,9 @@ def alter_directory(directory, name, change, home, source, warn):
     if truetype:
         write_ttf_files(target, model, sheet, cells, root)
         data, count = build_ttf_from(target), 1
+    elif bitmap:
+        write_bdf_files(target, model, sheet, cells, root)
+        data, count = build_bdf_from(target, warn), 1
     else:
         count = len(write_files(target, data, Report())[1])
     back_up(font)
@@ -3606,17 +4631,20 @@ def bold_italic(target, name, rows):
     return alter(target, name, rows, Change(bold=True, italic=True))
 
 
-ALTERED = ("FILE.fon|FILE.ttf|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
+ALTERED = ("FILE.fon|FILE.ttf|FILE.bdf|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
     "the font file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
     "the code page of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
 # A verb as its name, its function, its argument and the help for it, the help for
 # --codepage, and its other options: columns, which is an argument before the other one,
 # and numbers, all passed on in this order.
 VERBS = (
-    ("unpack", unpack, "FILE.fon|FILE.ttf", "the .fon file or the TrueType font to unpack",
-        "the code page of the texts in a .fon file (default: %s), or of the places 0..255 in"
+    ("unpack", unpack, "FILE.fon|FILE.ttf|FILE.bdf",
+        "the .fon file, the TrueType font or the BDF font to unpack",
+        "the code page of the texts in a .fon file (default: %s), of the places 0..255 in"
         " the bitmaps of a TrueType font (default: the code page that the font declares,"
-        " if one alone, or %s)" % (DEFAULT_ENCODING, DEFAULT_ENCODING), ("patches",)),
+        " if one alone, or %s) or of a Unicode BDF font (default: %s), or of the codes of"
+        " another BDF font (default: the one its registry names, or %s)"
+        % ((DEFAULT_ENCODING,) * 4), ("patches",)),
     ("fon", fon, "FILE.fon%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
         "the directory that unpack made of a .fon file, the bitmaps of one fixed-pitch font,"
         " or one font as a .fnt file",
@@ -3625,11 +4653,17 @@ VERBS = (
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
         "the code page to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
-    ("ttf", ttf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
-        "the .fon file, the directory that unpack made of a .fon file or of a TrueType font,"
-        " the bitmaps of one fixed-pitch font, or one font as a .fnt file",
+    ("ttf", ttf, "FILE.fon|FILE.bdf|FILE%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt"
+        % FILES_SUFFIX, "the .fon file, the BDF font, the directory that unpack made of a"
+        " font file, the bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
-        " dfCharSet names)", ("rows", "em", "aliases", "patches", "unpack")),
+        " dfCharSet names, or for a BDF font that is not of Unicode, its registry)",
+        ("rows", "em", "aliases", "patches", "unpack")),
+    ("bdf", bdf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
+        "the .fon file, the directory that unpack made of a .fon file or of a BDF font, the"
+        " bitmaps of one fixed-pitch font, or one font as a .fnt file",
+        "the code page of the chars and of the texts (default: for the chars, the one that"
+        " dfCharSet names)", ("rows", "patches", "unpack")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
