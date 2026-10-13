@@ -10,7 +10,7 @@ Unless specified otherwise inside a subdirectory or in a file itself, the conten
 
 ## Tests
 
-The tests need only Python 3 and use the files in `tests/data`; run them from the repository root:
+The tests need Python 3; those of `pxfont.py` need Pillow as well, and one of them fontTools, and are skipped without them. The tests make up the disks and fonts they work on, so that no copyrighted software is needed. Run them from the repository root:
 
 ```
 python -m unittest discover tests
