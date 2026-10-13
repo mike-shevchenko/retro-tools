@@ -317,6 +317,7 @@ class SectorImageTest(ToolTest):
         po = bytearray(made_up_dsk())
         # The header of a ProDOS volume directory, where a .po keeps block 2.
         header = bytearray(512)
+        header[2] = 3  # the directory's next block, which ProDOS always puts after it
         header[4] = 0xF0 | 4
         header[5:9] = b"TEST"
         header[0x23], header[0x24] = 0x27, 0x0D

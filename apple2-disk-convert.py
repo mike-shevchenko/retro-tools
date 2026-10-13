@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Convert Apple2 and Agat 140 KB floppy disk images between the formats that FlashFloppy plays
-on a Gotek in its Apple2 mode - .nib, .nic and .hfe - and the sector images .dsk, .do and .po
-of emulators and disk archives.
+Convert Apple2 and Agat 140 KB floppy disk images between the sector images .dsk, .do and .po
+of emulators and disk archives and the track images .nib, .nic and .hfe, all of which
+FlashFloppy plays on a Gotek in its Apple2 mode.
 
 The extension of the target names its format. Given alone, as "hfe" or ".hfe", it takes the
 folder and the name of each source, and the extension as typed; several sources may be given
@@ -38,7 +38,8 @@ The formats, by extension:
 .hfe: the image of the HxC floppy emulator: each track as a stream of flux cells; any layout
     and timing fit.
 
-FlashFloppy plays .nib, .nic and .hfe in its Apple2 mode.
+FlashFloppy plays all six in its Apple2 mode. It lays out the tracks of a sector image as this
+tool does, but always with the volume number 254.
 
 How images are converted:
 
