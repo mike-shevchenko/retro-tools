@@ -17,6 +17,7 @@ import contextlib
 import functools
 import importlib
 import io
+import json
 import os
 import random
 import shutil
@@ -652,6 +653,236 @@ class CommandLineTest(ToolTest):
         self.assertIn("not written", output)
         self.assertIn("track 1: sectors 0 to 15 differ", output)
         self.assertFalse(os.path.exists(self.path("DISK.hfe")))
+
+
+def dos_put(image, track, sector, at, data):
+    """Put data into a DOS-ordered image, at a byte of a sector as DOS numbers it."""
+    offset = (track * 16 + sector) * 256 + at
+    image[offset:offset + len(data)] = data
+
+
+# The Agat's codes of some Cyrillic words: IGRY, ZAYATS and MORKOVKA.
+GAMES = bytes([0xE9, 0xE7, 0xF2, 0xF9])
+HARE = bytes([0xFA, 0xE1, 0xF1, 0xE3])
+CARROT = bytes([0xED, 0xEF, 0xF2, 0xEB, 0xEF, 0xF7, 0xEB, 0xE1])
+
+
+def agat_dos_dsk():
+    """dos33_dsk() with a directory as the Agat's DOS keeps one, GAMES in Cyrillic, which holds
+    a text file, HARE, of one line, CARROT: the directory's catalog on track 19, sector 15,
+    starting with the entry back to the catalog above, the file's track/sector list on sector
+    14 and its text on 13."""
+    image = bytearray(dos33_dsk())
+    dos_put(image, 17, 15, 0x0B + 35, bytes([19, 15, 0xFF]) + GAMES.ljust(30, b"\xA0")
+        + b"\x01\x00")
+    dos_put(image, 19, 15, 0x0B, bytes([17, 15, 0xFF]) + bytes([0xA0] * 30) + b"\x01\x00")
+    dos_put(image, 19, 15, 0x0B + 35, bytes([19, 14, 0x00]) + HARE.ljust(30, b"\xA0")
+        + b"\x01\x00")
+    dos_put(image, 19, 14, 0x0C, bytes([19, 13]))
+    dos_put(image, 19, 13, 0, CARROT + b"\x8D\x00")
+    return bytes(image)
+
+
+def chars(*codes):
+    """A string of characters by their code points, which keeps this file ASCII."""
+    return "".join(map(chr, codes))
+
+
+class AgatCharsTest(unittest.TestCase):
+
+    def test_codes(self):
+        self.assertEqual(len(tool.AGAT_CHARS), 256)
+        # Cyrillic capitals and small letters, Latin ones, the currency sign, two spaces
+        self.assertEqual(tool.agat_text(bytes([0xE0, 0xFF, 0x60, 0x7F])),
+            chars(0x42E, 0x42A, 0x44E, 0x44A))
+        self.assertEqual(tool.agat_text(bytes([0xC1, 0x41, 0xA4, 0x20, 0x30])),
+            "Aa" + chars(0xA4) + "  ")
+        # A heavy arc as a light one, a degree sign, a low ring, a face and a creature as
+        # empty squares, and the suits outlined
+        self.assertEqual(tool.agat_text(bytes([0x31, 0x9B, 0x9C, 0x80, 0x96])),
+            chars(0x256D, 0xB0, 0x2F3, 0x25A1, 0x25A1))
+        self.assertEqual(tool.agat_text(bytes(range(0x91, 0x95))),
+            chars(0x2664, 0x2667, 0x2662, 0x2661))
+
+    def test_no_emoji(self):
+        # Characters of the Emoji property, which some fonts draw in color.
+        emoji = set(range(0x2194, 0x219A)) | {0x2660, 0x2663, 0x2665, 0x2666, 0x263A, 0x25AA,
+            0x25AB} | set(range(0x25FB, 0x25FF)) | set(range(0x2B05, 0x2B08))
+        self.assertFalse(emoji & {ord(char) for char in tool.AGAT_CHARS})
+
+
+class HexdumpTest(unittest.TestCase):
+
+    def test_form(self):
+        self.assertEqual(tool.hexdump(b"AGAT-DISK\x01\x05\x00\x00\x0a\xf4 ",
+            char=tool.label_char), ["00000000  41 47 41 54 2d 44 49 53  4b 01 05 00 00 0a f4 20"
+            "  |AGAT-DISK....." + chars(0x407) + " |"])
+        self.assertEqual(tool.hexdump(b"\xc8\xc9\x00", 0x11010),
+            ["00011010  c8 c9 00  |HI.|"])
+
+    def test_round_trip(self):
+        data = bytes(range(256)) * 2
+        chunks = tool.parse_hexdump("\n".join(tool.hexdump(data, 0x11000)), "x")
+        self.assertEqual(chunks[0][0], 0x11000)
+        self.assertEqual(b"".join(chunk for _, chunk in chunks), data)
+
+    def test_comments_and_bad_lines(self):
+        self.assertEqual(tool.parse_hexdump("# a comment\n\n00000010  01 02  |..|\n", "x"),
+            [(16, b"\x01\x02")])
+        with self.assertRaises(tool.Failure):
+            tool.parse_hexdump("00000000  1 2\n", "x")
+
+
+class BasicListingTest(unittest.TestCase):
+
+    def test_applesoft(self):
+        self.assertEqual(tool.basic_listing(struct.pack("<H", len(HELLO)) + HELLO),
+            "10 PRINT \"HELLO FROM A MADE-UP DISK\"\n20 END\n")
+
+    def test_agat_long_names(self):
+        # Line 10 PRINT and a long name, the first of the table after the program; the file's
+        # length takes in the table and its size, which ends the file.
+        program = struct.pack("<HH", 0x0808, 10) + bytes([0xBA, 0x01, 0x01, 0x00]) + b"\0\0"
+        table = b"LONGNAM" + bytes([ord("E") | 0x80]) + b"\0"
+        size = 2 + len(program) + len(table) + 2
+        data = struct.pack("<H", size) + program + table + struct.pack("<H", len(table) - 1)
+        self.assertEqual(tool.basic_listing(data), "10 PRINT LONGNAME\n")
+
+
+class UnpackPackTest(ToolTest):
+    """Images unpacked into folders and packed back."""
+
+    def unpack(self, name, data, *options):
+        """Unpack a file made of data; return the folder and what the tool printed."""
+        source = self.make(name, data)
+        status, output = self.run_tool("unpack", *options, source)
+        self.assertEqual(status, 0, output)
+        return source + ".files", output
+
+    def packed(self, folder, target, *options):
+        status, output = self.run_tool("pack", *options, folder, self.path(target))
+        self.assertEqual(status, 0, output)
+        return read(self.path(target)), output
+
+    def test_every_format_packs_back(self):
+        dsk = self.make("DISK.dsk", dos33_dsk())
+        for image_format in ("dsk", "do", "po", "nic", "nib", "hfe"):
+            image = (read(dsk) if image_format == "dsk"
+                else self.converted(dsk, self.path("made.%s" % image_format)))
+            folder, output = self.unpack("ONE.%s" % image_format, image)
+            self.assertIn("packs back to the same image, byte for byte", output, image_format)
+            packed, _ = self.packed(folder, "back.%s" % image_format)
+            self.assertEqual(packed, image, image_format)
+
+    def test_files_listing_and_json(self):
+        folder, output = self.unpack("DISK.dsk", dos33_dsk())
+        self.assertIn("DOS 3.3, release 3, volume 254: 1 file", output)
+        self.assertEqual(read(os.path.join(folder, "files", "HELLO.A")), HELLO)
+        self.assertEqual(read(os.path.join(folder, "files", "HELLO.A.txt")).decode("utf-8"),
+            "10 PRINT \"HELLO FROM A MADE-UP DISK\"\n20 END\n")
+        with open(os.path.join(folder, "disk.json"), encoding="utf-8") as stream:
+            meta = json.load(stream)
+        self.assertEqual(meta["file_system"], "dos33")
+        self.assertEqual(meta["files"][0]["_name"], "HELLO")
+        self.assertEqual(meta["files"][0]["catalog"], [17, 15, 0])
+        self.assertTrue(os.path.exists(os.path.join(folder, "catalog.hex")))
+
+    def test_changed_file_goes_into_its_sectors(self):
+        folder, _ = self.unpack("DISK.dsk", dos33_dsk())
+        changed = HELLO.replace(b"MADE-UP", b"CHANGED")
+        write(os.path.join(folder, "files", "HELLO.A"), changed)
+        packed, _ = self.packed(folder, "back.dsk")
+        sector = dsk_sector(packed, 18, tool.DOS_ORDER.index(14))
+        self.assertEqual(sector, (struct.pack("<H", len(changed)) + changed).ljust(256, b"\0"))
+
+    def test_file_that_outgrows_its_sectors_stops_the_pack(self):
+        folder, _ = self.unpack("DISK.dsk", dos33_dsk())
+        write(os.path.join(folder, "files", "HELLO.A"), HELLO + bytes(300))
+        status, output = self.run_tool("pack", folder, self.path("back.dsk"))
+        self.assertEqual(status, 2)
+        self.assertIn("doesn't fit the sectors its file has on the disk", output)
+        self.assertFalse(os.path.exists(self.path("back.dsk")))
+
+    def test_changed_listing_is_told(self):
+        folder, _ = self.unpack("DISK.dsk", dos33_dsk())
+        write(os.path.join(folder, "files", "HELLO.A.txt"), b"10 PRINT \"OTHER\"\n")
+        packed, output = self.packed(folder, "back.dsk")
+        self.assertIn("has changed, but it is only for reading", output)
+        self.assertEqual(packed, dos33_dsk())
+
+    def test_label_goes_along(self):
+        label = b"AGAT-DISK" + bytes(103) + b"NAME".ljust(16, b"\0")
+        folder, output = self.unpack("LABEL.dsk", dos33_dsk() + label)
+        self.assertIn("byte for byte", output)
+        self.assertTrue(os.path.exists(os.path.join(folder, "label.hex")))
+        packed, _ = self.packed(folder, "back.dsk")
+        self.assertEqual(packed, dos33_dsk() + label)
+
+    def test_disk_of_no_catalog_is_sectors(self):
+        folder, output = self.unpack("DISK.dsk", made_up_dsk())
+        self.assertIn("byte for byte", output)
+        self.assertEqual(sorted(os.listdir(folder)), ["disk.json", "sectors.hex"])
+        packed, _ = self.packed(folder, "back.dsk")
+        self.assertEqual(packed, made_up_dsk())
+
+    def test_agat_directory_and_cyrillic_names(self):
+        folder, output = self.unpack("AGAT.dsk", agat_dos_dsk())
+        self.assertIn("2 files in 2 directories", output)
+        hare = os.path.join(folder, "files", tool.agat_text(GAMES), tool.agat_text(HARE) + ".T")
+        self.assertEqual(read(hare), CARROT + b"\x8D")
+        self.assertEqual(read(hare + ".txt").decode("utf-8"), tool.agat_text(CARROT) + "\n")
+        packed, _ = self.packed(folder, "back.dsk")
+        self.assertEqual(packed, agat_dos_dsk())
+
+    def test_track_image_keeps_volumes_and_spare_pairs(self):
+        disk = tool.read_image(dos33_dsk(), "dsk", "x")[0]
+        disk = tool.SectorDisk([[sector._replace(volume=9, spare=(tool.swapped_low_bits(
+            sector.data[0]), tool.swapped_low_bits(sector.data[1]))) for sector in sectors]
+            for sectors in disk.sectors])
+        nic = tool.nic_bytes(disk)
+        folder, output = self.unpack("DOS.nic", nic)
+        self.assertIn("byte for byte", output)
+        with open(os.path.join(folder, "disk.json"), encoding="utf-8") as stream:
+            meta = json.load(stream)
+        self.assertEqual((meta["volume"], meta["spare_pairs"]), (9, "dos"))
+        packed, _ = self.packed(folder, "back.nic")
+        self.assertEqual(packed, nic)
+
+    def test_unreadable_sectors_need_salvage(self):
+        nic = bytearray(made_up_nic())
+        nic[(18 * 16 + 3) * 512 + 100] ^= 0xFF  # a nibble of a data field
+        source = self.make("BAD.nic", bytes(nic))
+        status, output = self.run_tool("unpack", source)
+        self.assertEqual(status, 2)
+        self.assertIn("can't be unpacked without losing", output)
+        folder, output = self.unpack("BAD2.nic", bytes(nic), "--salvage")
+        with open(os.path.join(folder, "disk.json"), encoding="utf-8") as stream:
+            self.assertEqual(json.load(stream)["_unreadable"], ["18:3"])
+
+    def test_options_that_dont_fit_are_explained(self):
+        source = self.make("DISK.dsk", dos33_dsk())
+        for args, words in ((("unpack", "--volume", "5", source), "--volume can't be used"),
+                (("unpack", "--rate", "250", source), "--rate can't be used"),
+                (("unpack", "--salvage", source), "--salvage can't be used")):
+            status, output = self.run_tool(*args)
+            self.assertEqual(status, 2, args)
+            self.assertIn(words, output)
+        folder, _ = self.unpack("DISK2.dsk", dos33_dsk())
+        for args, words in ((("pack", "--salvage", folder), "--salvage can't be used"),
+                (("pack", "--rate", "250", folder, self.path("x.dsk")), "--rate can't be used")):
+            status, output = self.run_tool(*args)
+            self.assertEqual(status, 2, args)
+            self.assertIn(words, output)
+
+    def test_backups(self):
+        source = self.make("DISK.dsk", dos33_dsk())
+        for _ in range(2):
+            status, output = self.run_tool("unpack", source)
+            self.assertEqual(status, 0, output)
+        self.assertTrue(os.path.isdir(source + ".files.BAK"))
+        status, output = self.run_tool("unpack", source)
+        self.assertEqual(status, 2)
+        self.assertIn("move one of them away", output)
 
 
 if __name__ == "__main__":

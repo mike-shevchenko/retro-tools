@@ -2,7 +2,8 @@
 """
 Convert Apple2 and Agat 140 KB floppy disk images between the sector images .dsk, .do and .po
 of emulators and disk archives and the track images .nib, .nic and .hfe, all of which
-FlashFloppy plays on a Gotek in its Apple2 mode.
+FlashFloppy plays on a Gotek in its Apple2 mode; unpack an image into a folder of its files,
+and pack such a folder back into an image.
 
 The extension of the target names its format. Given alone, as "hfe" or ".hfe", it takes the
 folder and the name of each source, and the extension as typed; several sources may be given
@@ -50,11 +51,35 @@ found wrong, and --salvage writes zeros for what can't be read. From .nib, .nic 
 
 Every image is read back from what is to be written and compared with the source: sector by
 sector, and when tracks went across as they are, every byte the controller would read.
+
+Unpacking and packing:
+
+    apple2-disk-convert.py unpack GAME.nic
+    apple2-disk-convert.py pack GAME.nic.files [[TARGET].]EXT
+
+unpack writes an image as a folder beside it, GAME.nic.files. The files of a DOS 3.3 catalog,
+the Agat's DOS included, go under files/, a folder to each directory of the Agat's DOS, each
+named as the catalog has it, in the Agat's letters, with its type as the extension: T, I, A,
+B, S and the Agat's own. A BASIC program and a text file also get their text beside them, as
+NAME.txt, to read. What no file holds goes into hex dumps, as hexdump -Cv shows them: DOS
+itself (boot.hex), the catalog (catalog.hex), sectors in no file (unused.hex), what follows
+the end of a file in its sectors (tails.hex), an Agat label (label.hex); a disk with no
+catalog is sectors.hex alone. disk.json holds the rest: the format, where each file's entry
+is, and for a track image the volume number and the spare bits of each sector. Every unpack
+checks that the folder packs back into the same image, or into the same sectors where a track
+image had its tracks laid out otherwise.
+
+pack writes a folder back as an image, of the format the folder came from unless told. A file
+that was edited goes back into the sectors it had, its length told anew; one that no longer
+fits them stops the pack, as the catalog is not rewritten. The .txt files are only for
+reading, and pack says so if one was changed.
 """
 # Written with the help of Claude Opus 5.5.
 
 import argparse
 import collections
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -1111,21 +1136,27 @@ def decoded(conversion, readings, salvage, lines):
     """The SectorDisk of tracks read, with the volume number of each sector. Unless every track
     is standard, raise a Failure that says why the target can't hold them, or with salvage let
     zeros stand for the sectors that can't be read, and add lines that say so."""
+    refusal = ("%s can't become a .%s without losing what these tracks hold:"
+        % (conversion.source, conversion.target_format), SALVAGE_ADVICE % {
+            "target": conversion.target_format, "keeps": KEEPS[conversion.target_format]})
+    return decoded_tracks(readings, salvage, lines, refusal,
+        "the .%s" % conversion.target_format)
+
+
+def decoded_tracks(readings, salvage, lines, refusal, what):
+    """decoded() for any purpose: refusal is the first and the last line of the Failure, what
+    names what gets the tracks."""
     count = len(readings)
     while count > STANDARD_TRACKS and readings[count - 1].blank:
         count -= 1
     if count < len(readings):
-        lines.append("  %s hold no fields at all, so the .%s gets %d tracks" % (
-            counted("track", range(count, len(readings))), conversion.target_format, count))
+        lines.append("  %s hold no fields at all, so %s gets %d tracks" % (
+            counted("track", range(count, len(readings))), what, count))
         readings = readings[:count]
     bad = [track for track, reading in enumerate(readings) if not reading.is_standard()]
     if bad and not salvage:
-        raise Failure("\n".join(
-            ["%s can't become a .%s without losing what these tracks hold:"
-                % (conversion.source, conversion.target_format)]
-            + ["  " + line for line in faults_text(readings)]
-            + [SALVAGE_ADVICE % {"target": conversion.target_format,
-                "keeps": KEEPS[conversion.target_format]}]))
+        raise Failure("\n".join([refusal[0]] + ["  " + line for line in faults_text(readings)]
+            + [refusal[1]]))
     lost = Sector(usual_volume(readings), bytes(SECTOR_BYTES))
     sectors = [[reading.sectors.get(s, lost) for s in range(SECTORS)] for reading in readings]
     if bad:
@@ -1330,8 +1361,958 @@ def install(target, image, dry_run):
 
 
 # =============================================================================================
-# The command line
+# The Agat's characters
 # =============================================================================================
+#
+# The Agat draws 256 characters. DOS writes A0-FF: A0-DF are the ASCII of 20-5F, with a
+# currency sign in place of the dollar, and E0-FF the Cyrillic capitals in the order of KOI-7.
+# 40-7F hold the small letters, Latin and Cyrillic, in the same orders: BASIC keeps the
+# characters of a string without the top bit and prints them with it. 00-3F and 80-9F are fill
+# patterns, block elements, box drawing and symbols; one that has no fair likeness in Unicode,
+# or only an emoji, which some fonts draw in color, is an empty square here.
+
+EMPTY_SQUARE = 0x25A1
+# The small Cyrillic letters in the order of KOI-7: from 60, and from E0 as capitals.
+KOI7_CYRILLIC = (0x44E, 0x430, 0x431, 0x446, 0x434, 0x435, 0x444, 0x433, 0x445, 0x438, 0x439,
+    0x43A, 0x43B, 0x43C, 0x43D, 0x43E, 0x43F, 0x44F, 0x440, 0x441, 0x442, 0x443, 0x436, 0x432,
+    0x44C, 0x44B, 0x437, 0x448, 0x44D, 0x449, 0x447, 0x44A)
+AGAT_GRAPHICS = (
+    # 00: fill patterns, zigzags and a thin line as plain lines, a bar, diagonals, triangles.
+    0x25A8, 0x25A7, 0x25A7, 0x25A4, 0x2592, 0x25A5, 0x2500, 0x2502,
+    0x2500, 0x2500, 0x25AC, 0x2572, 0x25E3, 0x2571, 0x25E2, 0x2573,
+    # 10: fill patterns, then the lower eighths of the cell and the left ones.
+    0x25A8, 0x25A7, 0x25A7, 0x2581, 0x2582, 0x2583, 0x2584, 0x2585,
+    0x2586, 0x2587, 0x258F, 0x258E, 0x258D, 0x258C, 0x258B, 0x258A,
+    # 20: light box drawing.
+    0x0020, 0x256D, 0x256E, 0x2570, 0x256F, 0x250C, 0x2510, 0x2514,
+    0x2518, 0x2500, 0x2502, 0x251C, 0x2524, 0x252C, 0x2534, 0x253C,
+    # 30: heavy box drawing, but for the arcs, which Unicode has light only.
+    0x0020, 0x256D, 0x256E, 0x2570, 0x256F, 0x250F, 0x2513, 0x2517,
+    0x251B, 0x2501, 0x2503, 0x2523, 0x252B, 0x2533, 0x253B, 0x254B,
+)
+AGAT_SYMBOLS = (
+    # 80: a face, a dot, squares, a house, arrows, a ceiling, for-all, there-exists, two men.
+    EMPTY_SQUARE, 0x00B7, EMPTY_SQUARE, 0x22A1, 0x25A3, 0x25A1, EMPTY_SQUARE, 0x2302,
+    0x2190, 0x2309, 0x2200, 0x2203, 0x2B09, EMPTY_SQUARE, 0x1FBC5, EMPTY_SQUARE,
+    # 90: a diameter, the suits, arrows, game creatures, a degree sign, a low ring.
+    0x2300, 0x2664, 0x2667, 0x2662, 0x2661, 0x2192, EMPTY_SQUARE, EMPTY_SQUARE,
+    0x2B0B, 0x2191, 0x2193, 0x00B0, 0x02F3, 0x2B08, 0x2B0A, EMPTY_SQUARE,
+)
+
+
+def agat_chars():
+    """The character of each of the 256 codes."""
+    chars = [chr(code) for code in AGAT_GRAPHICS]
+    chars += [chr(code) for code in range(0x60, 0x80)]
+    # The ASCII bar and DEL, drawn as a broken bar and a full block.
+    chars[0x5C], chars[0x5F] = chr(0xA6), chr(0x2588)
+    chars += [chr(code) for code in KOI7_CYRILLIC]
+    chars += [chr(code) for code in AGAT_SYMBOLS]
+    chars += [chr(code) for code in range(0x20, 0x60)]
+    chars[0xA4] = chr(0xA4)
+    chars += [chr(code - 0x20) for code in KOI7_CYRILLIC]
+    return tuple(chars)
+
+
+AGAT_CHARS = agat_chars()
+
+
+def agat_text(data):
+    return "".join(AGAT_CHARS[byte] for byte in data)
+
+
+def readable(byte):
+    """Whether a code is a letter, a digit or a sign, as opposed to graphics."""
+    return byte >= 0xA0 or 0x40 <= byte < 0x80
+
+
+# The tokens of the Agat's BASIC, 80 to EA, which Applesoft's are but for a few: GR=, TEXT=,
+# MGR=, HGR= and RIBBON= for its own graphics, ! for its assembler, and the currency sign.
+AGAT_BASIC_TOKENS = ("END", "FOR", "NEXT", "DATA", "INPUT", "DEL", "DIM", "READ", "GR=",
+    "TEXT=", "PR#", "IN#", "CALL", "PLOT", "!", "&", "MGR=", "HGR=", "RIBBON=", "&", "DRAW",
+    "XDRAW", "HTAB", "HOME", "ROT=", "SCALE=", "SHLOAD", "TRACE", "NOTRACE", "NORMAL",
+    "INVERSE", "FLASH", "COLOR=", "POP", "VTAB", "HIMEM:", "LOMEM:", "ONERR", "RESUME",
+    "RECALL", "STORE", "SPEED=", "LET", "GOTO", "RUN", "IF", "RESTORE", "&", "GOSUB", "RETURN",
+    "REM", "STOP", "ON", "WAIT", "LOAD", "SAVE", "DEF", "POKE", "PRINT", "CONT", "LIST",
+    "CLEAR", "GET", "NEW", "TAB(", "TO", "FN", "SPC(", "THEN", "AT", "NOT", "STEP", "+", "-",
+    "*", "/", "^", "AND", "OR", ">", "=", "<", "SGN", "INT", "ABS", "USR", "FRE", "SCRN(",
+    "PDL", "POS", "SQR", "RND", "LOG", "EXP", "COS", "SIN", "TAN", "ATN", "PEEK", "LEN",
+    "STR" + chr(0xA4), "VAL", "ASC", "CHR" + chr(0xA4), "LEFT" + chr(0xA4),
+    "RIGHT" + chr(0xA4), "MID" + chr(0xA4))
+
+
+def basic_names(data):
+    """The long variable names of an Agat BASIC program: data is the file, its length first,
+    and the two bytes before the end of that length give the size of a table of names before
+    them, each name ending with a character whose top bit is set. Applesoft has no such table,
+    and ends with two zeros instead."""
+    names = []
+    if len(data) < 2:
+        return names
+    declared = data[0] | data[1] << 8
+    if not 4 <= declared <= len(data):
+        return names
+    size = data[declared - 2] | data[declared - 1] << 8
+    start = declared - 2 - size - 1
+    if not size or start < 2:
+        return names
+    name = ""
+    for byte in data[start:declared - 2]:
+        if byte == 0:
+            break
+        name += AGAT_CHARS[byte | 0x80]
+        if byte & 0x80:
+            names.append(name)
+            name = ""
+    return names
+
+
+def basic_listing(data):
+    """A BASIC program as text, a line to a line. data is the file: the program's length in 2
+    bytes, then its image in memory from $801 on, each line the address of the next one (0
+    after the last), its number, its tokens and characters, and a 0. The Agat's BASIC has
+    variables of long names too, given as 01 or 02 and a number in a table after the program.
+    The characters of strings, of REM and of DATA are kept as they are."""
+    names = basic_names(data)
+    program = data[2:]
+    lines = []
+    at = 0
+    while at + 4 <= len(program):
+        link, number = struct.unpack_from("<HH", program, at)
+        if link == 0:
+            break
+        at += 4
+        text = ""
+        quoted = verbatim = False
+        while at < len(program) and program[at] != 0:
+            byte = program[at]
+            at += 1
+            if byte in (1, 2) and not quoted and not verbatim and at < len(program):
+                index = (byte - 1) << 8 | program[at]
+                at += 1
+                text += names[index - 1] if 0 < index <= len(names) else "?VAR%d?" % index
+            elif byte >= 0x80 and not quoted and not verbatim:
+                index = byte - 0x80
+                word = AGAT_BASIC_TOKENS[index] if index < len(AGAT_BASIC_TOKENS) else (
+                    "<%02X>" % byte)
+                if not word[0].isalpha():
+                    # An operator stands between its operands as the characters do.
+                    text = text.rstrip(" ") + word
+                else:
+                    text = text.rstrip(" ") + " " + word + ("" if word.endswith("(") else " ")
+                verbatim = word in ("REM", "DATA")
+            else:
+                char = AGAT_CHARS[byte if byte >= 0x80 else byte | 0x80]
+                quoted ^= char == "\""
+                verbatim = verbatim and not (char == ":" and not quoted and "DATA" in text)
+                text += char
+        at += 1
+        lines.append("%d %s" % (number, text.strip(" ")))
+    return "".join(line + "\n" for line in lines)
+
+
+def text_view(data):
+    """A text file as text: its characters to its first 00, return (8D) ending a line."""
+    end = data.find(0)
+    if end >= 0:
+        data = data[:end]
+    text = "".join("\n" if byte == 0x8D else AGAT_CHARS[byte] for byte in data)
+    return text if text.endswith("\n") or not text else text + "\n"
+
+
+# =============================================================================================
+# Hex dumps
+# =============================================================================================
+#
+# What has no file of its own, as the sectors of DOS itself or the label of an Agat image, is
+# unpacked as a hex dump in the form of `hexdump -Cv`: the offset, 16 bytes in hex, then the
+# same bytes as characters, the Agat's where it has a letter, a digit or a sign, else a dot.
+# Packing reads the offset and the bytes and ignores the rest, and a line starting with "#" is
+# a comment: so the bytes, not the characters, are to be edited.
+
+def agat_char(byte):
+    return AGAT_CHARS[byte] if readable(byte) else "."
+
+
+def label_char(byte):
+    """A character of an Agat label, which is ASCII and Cyrillic in code page 866."""
+    if 0x20 <= byte < 0x7F:
+        return chr(byte)
+    return bytes([byte]).decode("cp866") if byte >= 0x80 else "."
+
+
+def hexdump(data, offset=0, char=agat_char):
+    """The lines of a hex dump of data, its first byte at offset."""
+    lines = []
+    for at in range(0, len(data), 16):
+        row = data[at:at + 16]
+        cells = " ".join("%02x" % byte for byte in row[:8])
+        if len(row) > 8:
+            cells += "  " + " ".join("%02x" % byte for byte in row[8:])
+        lines.append("%08x  %s  |%s|" % (offset + at, cells, "".join(map(char, row))))
+    return lines
+
+
+def parse_hexdump(text, name):
+    """The (offset, bytes) of each line of a hex dump."""
+    chunks = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split("|")[0].split()
+        try:
+            if len(fields) < 2 or any(len(field) != 2 for field in fields[1:]):
+                raise ValueError
+            chunks.append((int(fields[0], 16), bytes(int(field, 16) for field in fields[1:])))
+        except ValueError:
+            raise Failure("%s, line %d, is no line of a hex dump: an offset, then bytes in hex,"
+                " two digits each, and what follows a \"|\" is left alone" % (name, number))
+    return chunks
+
+
+# =============================================================================================
+# DOS 3.3 and the Agat's DOS
+# =============================================================================================
+#
+# DOS numbers the sectors of a track in its own order, the order of a .dsk, and its catalog
+# names sectors so. Track 17, sector 0 is the VTOC: bytes 1 and 2 the catalog's first track and
+# sector, 3 the release of DOS, 6 the volume number, 27h the track/sector pairs a list holds,
+# 34h to 37h the tracks, the sectors a track and the bytes a sector (35, 16, 256), and from 38h
+# four bytes a track: in the first two a bit for each sector, set when it is free, sectors 15
+# to 8 and then 7 to 0, top bits first.
+#
+# The catalog is a chain of sectors, each naming the next in bytes 1 and 2 (0 0 ends it) and
+# holding seven entries of 35 bytes from 0Bh. An entry has the track and sector of the file's
+# first track/sector list (track 0: no entry from here on; FF: deleted, the track then in the
+# entry's last byte), its type, its name in 30 bytes with the top bit set, and its length in
+# sectors. The type is a bit: 00 text (T), 01 Integer BASIC (I), 02 Applesoft (A), 04 binary
+# (B), 08 S, 10, 20 and 40, which Apple's DOS calls R, a and b and the Agat's shows as Cyrillic
+# letters, PE, KA and DE; bit 7 locks the file. The Agat's DOS takes FF for a directory, whose
+# own catalog starts with an entry for the directory above it.
+#
+# A track/sector list names the next one in bytes 1 and 2, and from 0Ch the file's sectors in
+# pairs, 0 0 where the file has none. An Applesoft or Integer BASIC program starts with its
+# length in 2 bytes, a binary file with its address and its length; a text file runs to its
+# first 00.
+
+DOS_TYPES = {0x00: "T", 0x01: "I", 0x02: "A", 0x04: "B", 0x08: "S", 0x10: chr(0x41F),
+    0x20: chr(0x41A), 0x40: chr(0x414)}
+DOS_HEADERS = {"I": 2, "A": 2, "B": 4}
+DOS_ENTRIES_AT = 0x0B
+DOS_ENTRY_BYTES = 35
+DOS_ENTRIES = 7
+DOS_PAIRS_AT = 0x0C
+DOS_PAIRS = 122  # what fits a sector, and what DOS 3.3 writes into the VTOC
+BOOT_TRACKS = 3  # where DOS keeps itself
+
+
+def dos_offset(track, sector):
+    return (track * SECTORS + sector) * SECTOR_BYTES
+
+
+def dos_sector(image, track, sector):
+    return bytes(image[dos_offset(track, sector):dos_offset(track, sector) + SECTOR_BYTES])
+
+
+class DosEntry:
+    """A catalog entry: where is (track, sector, index) of the catalog sector, folder the names
+    of the directories it is in and parent the entry of the last of them, positions the (track,
+    sector) of each data sector of a file, None where it has none, and lists those of its
+    track/sector lists."""
+
+    def __init__(self, where, raw, folder, parent):
+        self.where = where
+        self.raw = raw
+        self.folder = folder
+        self.parent = parent
+        self.positions = []
+        self.lists = []
+
+    @property
+    def deleted(self):
+        return self.raw[0] == 0xFF
+
+    @property
+    def directory(self):
+        return self.raw[2] == 0xFF and not self.deleted
+
+    @property
+    def locked(self):
+        return bool(self.raw[2] & 0x80) and not self.directory
+
+    @property
+    def type_letter(self):
+        if self.directory:
+            return "directory"
+        return DOS_TYPES.get(self.raw[2] & 0x7F, "%02X" % (self.raw[2] & 0x7F))
+
+    @property
+    def name(self):
+        return agat_text(self.raw[3:33]).rstrip(" ")
+
+    @property
+    def start(self):
+        """The first track/sector list, or a directory's first catalog sector."""
+        return (self.raw[0x20] if self.deleted else self.raw[0]), self.raw[1]
+
+
+class DosDisk:
+    """The catalog of a DOS 3.3 disk: its entries in the order of the catalog, and what each
+    sector holds, as role[(track, sector)]."""
+
+    def __init__(self, image, tracks):
+        self.image = image
+        self.tracks = tracks
+        vtoc = dos_sector(image, VTOC_TRACK, 0)
+        self.release, self.volume = vtoc[3], vtoc[6]
+        self.pairs = vtoc[0x27] if 0 < vtoc[0x27] <= DOS_PAIRS else DOS_PAIRS
+        self.entries = []
+        self.role = {(VTOC_TRACK, 0): "the VTOC"}
+        self.notes = []
+        self.walk((vtoc[1], vtoc[2]), (), None, None)
+
+    def inside(self, track, sector):
+        return 0 <= track < self.tracks and 0 <= sector < SECTORS
+
+    def claim(self, place, role):
+        if place in self.role:
+            self.notes.append("track %d, sector %d is both %s and %s" % (place + (
+                self.role[place], role)))
+        else:
+            self.role[place] = role
+
+    def walk(self, start, folder, parent, directory):
+        """Read a catalog chain and the directories it holds: parent is the first sector of the
+        catalog above, directory the entry of this one."""
+        place = start
+        seen = set()
+        where_name = "/".join(folder) or "the catalog"
+        while place[0] != 0 and self.inside(*place) and place not in seen:
+            seen.add(place)
+            self.claim(place, "a sector of %s" % where_name)
+            sector = dos_sector(self.image, *place)
+            for index in range(DOS_ENTRIES):
+                at = DOS_ENTRIES_AT + index * DOS_ENTRY_BYTES
+                raw = sector[at:at + DOS_ENTRY_BYTES]
+                if raw[0] == 0:
+                    return
+                entry = DosEntry(place + (index,), raw, folder, directory)
+                if entry.directory and parent is not None and entry.start == parent:
+                    continue  # the entry back to the directory above
+                self.entries.append(entry)
+                if entry.directory:
+                    self.walk(entry.start, folder + (entry.name,), start, entry)
+                elif not entry.deleted:
+                    self.read_lists(entry)
+            place = (sector[1], sector[2])
+
+    def read_lists(self, entry):
+        """The data sectors of a file, from its chain of track/sector lists."""
+        place = entry.start
+        while place[0] != 0 and self.inside(*place) and place not in entry.lists:
+            entry.lists.append(place)
+            self.claim(place, "a track/sector list of %s" % entry.name)
+            sector = dos_sector(self.image, *place)
+            for pair in range(self.pairs):
+                track, number = sector[DOS_PAIRS_AT + 2 * pair:DOS_PAIRS_AT + 2 * pair + 2]
+                if track == 0 or not self.inside(track, number):
+                    entry.positions.append(None)
+                else:
+                    entry.positions.append((track, number))
+            place = (sector[1], sector[2])
+        while entry.positions and entry.positions[-1] is None:
+            entry.positions.pop()
+        for position in entry.positions:
+            if position is not None:
+                self.claim(position, "data of %s" % entry.name)
+
+    def free(self, track, sector):
+        """Whether the VTOC marks a sector free."""
+        vtoc = dos_sector(self.image, VTOC_TRACK, 0)
+        at = 0x38 + 4 * track
+        if at + 2 > SECTOR_BYTES:
+            return False
+        bits = vtoc[at] << 8 | vtoc[at + 1]
+        return bool(bits >> sector & 1)
+
+    def data(self, entry):
+        """A file's bytes: its sectors one after the other, zeros where it has none."""
+        return b"".join(bytes(SECTOR_BYTES) if position is None
+            else dos_sector(self.image, *position) for position in entry.positions)
+
+
+def read_dos(image, tracks):
+    """The DosDisk of a disk held in DOS order, or None if it has no DOS 3.3 catalog."""
+    if tracks <= VTOC_TRACK:
+        return None
+    vtoc = dos_sector(image, VTOC_TRACK, 0)
+    if (vtoc[0x35] != SECTORS or vtoc[0x36:0x38] != b"\x00\x01" or not 0 < vtoc[1] < tracks
+            or vtoc[2] >= SECTORS):
+        return None
+    return DosDisk(image, tracks)
+
+
+def split_file(entry, data):
+    """A file's (header, contents): the header that DOS keeps before the contents, and the
+    contents as a file of their own, to the length the header gives, or with no header to
+    the last byte that isn't zero."""
+    size = DOS_HEADERS.get(entry.type_letter, 0)
+    if not size:
+        return b"", data.rstrip(b"\0")
+    header = data[:size]
+    length = struct.unpack_from("<H", header, size - 2)[0] if len(header) == size else 0
+    return header, data[size:size + length]
+
+
+def tail_dump(entry, data, end):
+    """The hex dump of what a file's sectors hold after its end, sector by sector at their
+    places on the disk, trailing zeros left out."""
+    lines = []
+    for index, position in enumerate(entry.positions):
+        first = max(end - index * SECTOR_BYTES, 0)
+        if position is None or first >= SECTOR_BYTES:
+            continue
+        chunk = data[index * SECTOR_BYTES + first:(index + 1) * SECTOR_BYTES].rstrip(b"\0")
+        if chunk:
+            lines += hexdump(chunk, dos_offset(*position) + first)
+    return lines
+
+
+# =============================================================================================
+# Unpacking and packing
+# =============================================================================================
+#
+# unpack writes an image as a folder, IMAGE.files: the files of its catalog under files/, a
+# folder to each directory, and what is in no file as hex dumps: the sectors of DOS itself on
+# tracks 0 to 2 (boot.hex), the VTOC, the catalog and the track/sector lists (catalog.hex), and
+# any other sector that isn't all zeros (unused.hex: deleted files, leftovers), or, without a
+# catalog, every such sector (sectors.hex). disk.json holds the rest: the format, the tracks,
+# the volume numbers and spare bits of a track image, and for each file where its entry is, the
+# header DOS keeps before it and what follows it in its last sector. Fields named _x are for
+# reading and are ignored by pack, and so are the listings of BASIC programs and the text of
+# text files written beside them.
+#
+# pack writes the image back: the hex dumps first, then each file into the sectors its
+# track/sector lists name. A file that has changed gets its header's length anew and no tail,
+# and a file that no longer fits its sectors stops the pack: the catalog is not rewritten.
+
+FILES_SUFFIX = ".files"
+FILES_FOLDER = "files"
+DUMPS = ("boot.hex", "catalog.hex", "unused.hex", "sectors.hex", "tails.hex")
+LABEL_DUMP = "label.hex"
+DISK_JSON = "disk.json"
+LISTING_SUFFIX = ".txt"
+FORBIDDEN = set("<>:\"/\\|?*")
+RESERVED = {"CON", "PRN", "AUX", "NUL"} | {"COM%d" % n for n in range(1, 10)} | {
+    "LPT%d" % n for n in range(1, 10)}
+
+
+def place_key(track, sector):
+    return "%d:%d" % (track, sector)
+
+
+def sha1(data):
+    return hashlib.sha1(data).hexdigest()
+
+
+def host_name(name, used):
+    """A file name the host takes for a name of the catalog, unlike any in used (case aside),
+    and added to it."""
+    clean = "".join("_" if char in FORBIDDEN or ord(char) < 32 else char for char in name)
+    clean = clean.rstrip(" .") or "_"
+    if clean.split(".")[0].upper() in RESERVED:
+        clean = "_" + clean
+    candidate, number = clean, 1
+    while candidate.casefold() in used:
+        number += 1
+        stem, dot, extension = clean.rpartition(".") if "." in clean else (clean, "", "")
+        candidate = "%s~%d%s%s" % (stem, number, dot, extension)
+    used.add(candidate.casefold())
+    return candidate
+
+
+def dos_image(disk):
+    """The sectors of a SectorDisk in DOS order, one after the other, as a .dsk has them."""
+    image = bytearray(len(disk.sectors) * TRACK_BYTES)
+    for track, sectors in enumerate(disk.sectors):
+        for physical, sector in enumerate(sectors):
+            at = dos_offset(track, DOS_ORDER[physical])
+            image[at:at + SECTOR_BYTES] = sector.data
+    return image
+
+
+def spare_modes(disk):
+    """The spare pairs of a disk's sectors as disk.json tells them: "zero" or "dos" (as DOS
+    3.3 fills them, with the pairs of bytes 0 and 1), whichever more sectors have, and the
+    sectors that have neither."""
+    def dos_spare(data):
+        return (swapped_low_bits(data[0]), swapped_low_bits(data[1]))
+    counts = collections.Counter()
+    for sectors in disk.sectors:
+        for sector in sectors:
+            spare = sector.spare or (0, 0)
+            counts["zero"] += spare == (0, 0)
+            counts["dos"] += spare == dos_spare(sector.data)
+    mode = "dos" if counts["dos"] > counts["zero"] else "zero"
+    exceptions = {}
+    for track, sectors in enumerate(disk.sectors):
+        for physical, sector in enumerate(sectors):
+            spare = tuple(sector.spare or (0, 0))
+            wanted = dos_spare(sector.data) if mode == "dos" else (0, 0)
+            if spare != wanted:
+                exceptions[place_key(track, physical)] = list(spare)
+    return mode, exceptions
+
+
+def describe_files(dos):
+    files = [entry for entry in dos.entries if not entry.directory and not entry.deleted]
+    directories = [entry for entry in dos.entries if entry.directory]
+    deleted = [entry for entry in dos.entries if entry.deleted]
+    what = "DOS 3.3, release %d, volume %d: %s" % (dos.release, dos.volume,
+        counted_things("file", len(files)))
+    if directories:
+        what += " in %s" % counted_things("directory", len(directories) + 1, "directories")
+    if deleted:
+        what += ", %d deleted" % len(deleted)
+    return what
+
+
+def counted_things(noun, number, plural=None):
+    return "%d %s" % (number, noun if number == 1 else plural or noun + "s")
+
+
+def unpacked(disk, image_format, source, salvaged):
+    """The folder of a SectorDisk, as {path: bytes}, and lines on what it holds."""
+    tracks = len(disk.sectors)
+    image = dos_image(disk)
+    track_source = image_format in TRACK_FORMATS
+    meta = {"format": image_format, "tracks": tracks, "file_system": None,
+        "_source": os.path.basename(source), "_tool": PROGRAM}
+    if track_source:
+        volumes = collections.Counter(sector.volume for sectors in disk.sectors
+            for sector in sectors)
+        volume = volumes.most_common(1)[0][0]
+        meta["volume"] = volume
+        meta["volumes"] = {place_key(track, physical): sector.volume
+            for track, sectors in enumerate(disk.sectors)
+            for physical, sector in enumerate(sectors) if sector.volume != volume}
+        meta["spare_pairs"], meta["spare_exceptions"] = spare_modes(disk)
+        if salvaged:
+            meta["_unreadable"] = salvaged
+    contents = {}
+    lines = []
+    dumps = collections.defaultdict(list)
+    dos = read_dos(image, tracks)
+    claimed = set()
+    if dos is not None:
+        meta["file_system"] = "dos33"
+        meta["_dos"] = {"release": dos.release, "volume": dos.volume, "catalog":
+            list(dos_sector(image, VTOC_TRACK, 0)[1:3])}
+        lines.append("  " + describe_files(dos))
+        lines += ["  " + note for note in dos.notes]
+        records = []
+        # The host folder of each directory's entry, and the names taken in each folder.
+        folders = {None: FILES_FOLDER}
+        used = collections.defaultdict(set)
+        listings = 0
+        for entry in dos.entries:
+            record = {"catalog": list(entry.where), "_name": entry.name,
+                "_type": entry.type_letter}
+            if entry.deleted:
+                record["_deleted"] = True
+                records.append(record)
+                continue
+            folder = folders[entry.parent]
+            names = used[folder.casefold()]
+            if entry.directory:
+                record["path"] = folders[entry] = folder + "/" + host_name(entry.name, names)
+                contents[record["path"]] = None
+                records.append(record)
+                continue
+            data = dos.data(entry)
+            header, body = split_file(entry, data)
+            path = folder + "/" + host_name(entry.name + "." + entry.type_letter, names)
+            record.update({"path": path, "sha1": sha1(body), "_locked": entry.locked,
+                "_sectors": len(entry.positions)})
+            if header:
+                record["header"] = header.hex()
+            tail = tail_dump(entry, data, len(header) + len(body))
+            if tail:
+                dumps["tails.hex"] += ["# after the end of " + path] + tail
+            if entry.type_letter == "B" and len(header) == 4:
+                record["_address"] = "$%04X" % struct.unpack_from("<H", header)[0]
+            contents[path] = body
+            view = None
+            if entry.type_letter == "A":
+                view = basic_listing(header + body)
+            elif entry.type_letter == "T":
+                view = text_view(body)
+            if view:
+                listing = path + LISTING_SUFFIX
+                names.add(listing.rsplit("/", 1)[1].casefold())
+                contents[listing] = view.encode("utf-8")
+                record["listing"] = {"path": listing, "sha1": sha1(contents[listing])}
+                listings += 1
+            records.append(record)
+            claimed.update(position for position in entry.positions if position is not None)
+        meta["files"] = records
+        if listings:
+            lines.append("  BASIC programs and text files get their text beside them, as"
+                " NAME.txt, to read; pack ignores it")
+    for track in range(tracks):
+        for sector in range(SECTORS):
+            place = (track, sector)
+            data = dos_sector(image, track, sector)
+            if place in claimed:
+                continue
+            if dos is None:
+                dump, role = "sectors.hex", None
+            elif place in dos.role:
+                dump, role = "catalog.hex", dos.role[place]
+            elif track < BOOT_TRACKS:
+                dump, role = "boot.hex", None
+            else:
+                dump = "unused.hex"
+                role = "free" if dos.free(track, sector) else "in use, but in no file"
+            if not any(data) and dump != "catalog.hex":
+                continue
+            heading = "# track %d, sector %d%s" % (track, sector, ": " + role if role else "")
+            dumps[dump] += [heading] + hexdump(data, dos_offset(track, sector))
+    for dump, dump_lines in dumps.items():
+        contents[dump] = "".join(line + "\n" for line in dump_lines).encode("utf-8")
+    if disk.label:
+        label = agat_label_text(disk.label)
+        if label:
+            meta["_label"] = label
+        contents[LABEL_DUMP] = "".join(line + "\n" for line in ["# the label after the"
+            " sectors"] + hexdump(disk.label, char=label_char)).encode("utf-8")
+    contents[DISK_JSON] = (json.dumps(meta, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+    return contents, lines
+
+
+def packed(read, name, options):
+    """The SectorDisk, the label and the disk.json of a folder, whose files read(path) gives,
+    None for one that is missing; and lines of warnings."""
+    raw = read(DISK_JSON)
+    if raw is None:
+        raise Failure("%s has no %s: it is no folder that unpack wrote" % (name, DISK_JSON))
+    try:
+        meta = json.loads(raw.decode("utf-8"))
+        tracks = int(meta["tracks"])
+    except (ValueError, KeyError, TypeError) as error:
+        raise Failure("%s/%s can't be read: %s" % (name, DISK_JSON, error))
+    if not STANDARD_TRACKS <= tracks <= MAX_TRACKS:
+        raise Failure("%s/%s says %d tracks, where an Apple2 disk has %d to %d"
+            % (name, DISK_JSON, tracks, STANDARD_TRACKS, MAX_TRACKS))
+    image = bytearray(tracks * TRACK_BYTES)
+    for dump in DUMPS:
+        text = read(dump)
+        if text is None:
+            continue
+        for offset, data in parse_hexdump(text.decode("utf-8"), "%s/%s" % (name, dump)):
+            if offset + len(data) > len(image):
+                raise Failure("%s/%s writes beyond the %d tracks of the disk, at %Xh"
+                    % (name, dump, tracks, offset))
+            image[offset:offset + len(data)] = data
+    label = bytearray()
+    text = read(LABEL_DUMP)
+    if text is not None:
+        for offset, data in parse_hexdump(text.decode("utf-8"), "%s/%s" % (name, LABEL_DUMP)):
+            if len(label) < offset + len(data):
+                label.extend(bytes(offset + len(data) - len(label)))
+            label[offset:offset + len(data)] = data
+    if len(label) not in (0, AGAT_LABEL_BYTES):
+        raise Failure("%s/%s holds %d bytes, where an Agat label has %d"
+            % (name, LABEL_DUMP, len(label), AGAT_LABEL_BYTES))
+    warnings = []
+    if meta.get("file_system") == "dos33":
+        write_files(image, tracks, meta, read, name, warnings)
+    sectors = []
+    for track in range(tracks):
+        row = []
+        for physical in range(SECTORS):
+            at = dos_offset(track, DOS_ORDER[physical])
+            data = bytes(image[at:at + SECTOR_BYTES])
+            row.append(Sector(sector_volume(meta, track, physical, options), data,
+                sector_spare(meta, track, physical, data)))
+        sectors.append(row)
+    return SectorDisk(sectors, bytes(label)), meta, warnings
+
+
+def sector_volume(meta, track, physical, options):
+    """The volume number of a sector: as disk.json has it for a track image's folder, as
+    --volume says or None (the DOS 3.3 catalog's, then the usual one) for a sector image's."""
+    if meta.get("volume") is None:
+        return options.volume
+    return meta.get("volumes", {}).get(place_key(track, physical), meta["volume"])
+
+
+def sector_spare(meta, track, physical, data):
+    spare = meta.get("spare_exceptions", {}).get(place_key(track, physical))
+    if spare is not None:
+        return tuple(spare)
+    if meta.get("spare_pairs") == "dos":
+        return (swapped_low_bits(data[0]), swapped_low_bits(data[1]))
+    return None
+
+
+def write_files(image, tracks, meta, read, name, warnings):
+    """Write each file of disk.json into the sectors its track/sector lists name."""
+    dos = read_dos(image, tracks)
+    if dos is None:
+        raise Failure("%s: its hex dumps hold no DOS 3.3 catalog, which disk.json says the"
+            " disk has" % name)
+    entries = {entry.where: entry for entry in dos.entries}
+    for record in meta.get("files", []):
+        if record.get("_deleted") or record.get("_type") == "directory" or "path" not in record:
+            continue
+        where = tuple(record["catalog"])
+        entry = entries.get(where)
+        if entry is None or entry.directory:
+            raise Failure("%s/%s names a file at track %d, sector %d, entry %d of the catalog,"
+                " where the catalog has none" % ((name, DISK_JSON) + where))
+        body = read(record["path"])
+        if body is None:
+            raise Failure("%s/%s is missing; pack writes every file of the catalog, so put it"
+                " back" % (name, record["path"]))
+        header = bytes.fromhex(record.get("header", ""))
+        # A changed file loses what followed its end (tails.hex), and its length is told anew.
+        changed = sha1(body) != record.get("sha1")
+        if changed and header:
+            if len(body) > 0xFFFF:
+                raise Failure("%s/%s holds %s bytes, more than DOS can tell in its two bytes of"
+                    " length" % (name, record["path"], grouped(len(body))))
+            header = header[:-2] + struct.pack("<H", len(body))
+        data = header + body
+        room = len(entry.positions) * SECTOR_BYTES
+        if len(data) > room:
+            raise Failure("%s/%s doesn't fit the sectors its file has on the disk: it needs %s"
+                " bytes, and its %s hold %s. A file is written back into its own sectors, as"
+                " the catalog has them, so it can't grow past them." % (name, record["path"],
+                grouped(len(data)), counted_things("sector", len(entry.positions)),
+                grouped(room)))
+        for index, position in enumerate(entry.positions):
+            chunk = data[index * SECTOR_BYTES:(index + 1) * SECTOR_BYTES]
+            if position is None:
+                if any(chunk):
+                    raise Failure("%s/%s has data where its file has no sector, at %Xh: a"
+                        " file is written back into its own sectors" % (name, record["path"],
+                        index * SECTOR_BYTES))
+                continue
+            at = dos_offset(*position)
+            if changed:
+                chunk = chunk.ljust(SECTOR_BYTES, b"\0")
+            image[at:at + len(chunk)] = chunk
+        listing = record.get("listing")
+        if listing:
+            view = read(listing["path"])
+            if view is not None and sha1(view) != listing.get("sha1"):
+                warnings.append("%s/%s has changed, but it is only for reading: pack takes %s"
+                    % (name, listing["path"], record["path"]))
+
+
+UNPACK_SALVAGE_ADVICE = ("A folder keeps the 256 bytes of each sector, the volume number of its"
+    " address field and the spare bits of its data field, but not a track laid out a way of its"
+    " own, so it can take a track only when every one of its sectors reads intact. To unpack"
+    " it anyway, with zeros for what can't be read, give --salvage.")
+
+
+def pack_product(disk, target_format, options, lines):
+    """The image of a SectorDisk in a format, as a Product."""
+    tracks = len(disk.sectors)
+    if target_format in SECTOR_FORMATS:
+        expected = [{number: Sector(None, sector.data) for number, sector in enumerate(sectors)}
+            for sectors in disk.sectors]
+        return Product(sector_image_bytes(disk, target_format),
+            "%d tracks of 16 sectors" % tracks, expected, disk.label)
+    if any(sector.volume is None for sectors in disk.sectors for sector in sectors):
+        volume, whence = dos33_volume(disk), "as the disk's DOS 3.3 catalog says"
+        if volume is None:
+            volume, whence = DEFAULT_VOLUME, "the usual one"
+        disk = SectorDisk([[sector if sector.volume is not None else sector._replace(
+            volume=volume) for sector in sectors] for sectors in disk.sectors], disk.label)
+        lines.append("  volume %d, %s" % (volume, whence))
+    if disk.label:
+        lines.append("  its Agat label has no place in %s and is left out"
+            % with_article(target_format))
+    description = "%d tracks laid out as SDISK// lays them out, %s" % (tracks,
+        disk_volumes(disk))
+    if target_format == "nic":
+        image = nic_bytes(disk)
+    elif target_format == "nib":
+        image = nib_bytes(tracks_of_sector_disk(disk))
+    else:
+        image = hfe_bytes(tracks_of_sector_disk(disk), options.rate)
+        description += ", %d kbit/s" % options.rate
+    return Product(image, description, expected_of(disk))
+
+
+def write_folder(folder, contents, dry_run):
+    """Write the files of contents ({path: bytes}, None for a folder) as the folder, an
+    existing one renamed to its backup first, and say what was done."""
+    check_backup(folder)
+    if os.path.lexists(folder) and not os.path.isdir(folder):
+        raise Failure("%s is a file, not a folder" % folder)
+    backup = folder + BACKUP_SUFFIX
+    renamed = ", the old one renamed to %s" % backup if os.path.lexists(folder) else ""
+    if dry_run:
+        return "would be written" + renamed
+    # Written aside first, so that a failed write leaves the old folder as it was.
+    temporary = tempfile.mkdtemp(dir=os.path.dirname(os.path.abspath(folder)), prefix=".",
+        suffix=".tmp")
+    try:
+        for path, data in sorted(contents.items()):
+            full = os.path.join(temporary, *path.split("/"))
+            if data is None:
+                os.makedirs(full, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as handle:
+                handle.write(data)
+        if renamed:
+            os.replace(folder, backup)
+        os.replace(temporary, folder)
+    finally:
+        if os.path.exists(temporary):
+            shutil.rmtree(temporary)
+    return "written" + renamed
+
+
+def packs_back(contents, image_format, data, disk, options):
+    """How the folder packs back into its source's format: a clause, or None when its sectors
+    would differ, which is a bug; problems then holds the lines on them."""
+    read = contents.get
+    packed_disk, _, _ = packed(read, "the folder", options)
+    product = pack_product(packed_disk, image_format, options, [])
+    if product.image == data:
+        return "packs back to the same image, byte for byte", []
+    if image_format in SECTOR_FORMATS:
+        expected = [{number: Sector(None, sector.data) for number, sector in enumerate(sectors)}
+            for sectors in disk.sectors]
+        label = disk.label
+    else:
+        expected, label = expected_of(disk), b""
+    problems = verify(Product(product.image, "", expected, label), image_format)
+    if problems:
+        return None, problems
+    return "packs back to the same sectors, its tracks laid out as SDISK// lays them out", []
+
+
+def unpack(source, options):
+    """Unpack one image as the options say; return 0 when it is done, and 1 when the folder
+    would not pack back to the same sectors, and so is not written."""
+    folder = source + FILES_SUFFIX
+    check_backup(folder)
+    with open(source, "rb") as handle:
+        data = handle.read()
+    image_format = format_of(source)
+    disk, notes = read_image(data, image_format, source)
+    readings = read_tracks(disk) if isinstance(disk, TrackDisk) else None
+    lines = ["%s: %s" % (source, describe_source(disk, readings, image_format))]
+    lines += ["  " + note for note in notes]
+    try:
+        salvaged = []
+        if readings is not None:
+            refusal = ("%s can't be unpacked without losing what these tracks hold:" % source,
+                UNPACK_SALVAGE_ADVICE)
+            sector_disk = decoded_tracks(readings, options.salvage, lines, refusal,
+                "the folder")
+            salvaged = [place_key(track, sector)
+                for track, reading in enumerate(readings[:len(sector_disk.sectors)])
+                for sector in range(SECTORS) if sector not in reading.sectors]
+        else:
+            sector_disk = disk
+        contents, more = unpacked(sector_disk, image_format, source, salvaged)
+        lines += more
+    finally:
+        for line in lines:
+            say(line)
+    checked = ""
+    if options.verify:
+        clause, problems = packs_back(contents, image_format, data, sector_disk, options)
+        if clause is None:
+            say("%s: not written: packed back, it would differ from the source, which is a bug"
+                " in this tool:" % folder)
+            for problem in problems:
+                say("  " + problem)
+            return 1
+        checked = "; " + clause
+    files = sum(1 for path, data in contents.items() if data is not None
+        and path.startswith(FILES_FOLDER + "/") and not path.endswith(LISTING_SUFFIX))
+    say("%s: %s: %s%s" % (folder, write_folder(folder, contents, options.dry_run),
+        counted_things("file", files), checked))
+    return 0
+
+
+def pack_target(folder, target, meta_format):
+    """The image a folder packs into: as target names it, or beside the folder with the
+    extension, or the source's name and format."""
+    base = folder[:-len(FILES_SUFFIX)] if folder.endswith(FILES_SUFFIX) else folder
+    if target is None:
+        return base if format_of(base) else base + "." + meta_format
+    extension = extension_alone(target)
+    if extension is None:
+        return target
+    if format_of(base):
+        base = os.path.splitext(base)[0]
+    return base + "." + extension
+
+
+def pack(folder, target, options):
+    """Pack one folder as the options say; return 0 when it is done, and 1 when the image
+    would not read back as meant, and so is not written."""
+    name = folder.rstrip("/\\")
+
+    def read(path):
+        full = os.path.join(name, *path.split("/"))
+        if not os.path.isfile(full):
+            return None
+        with open(full, "rb") as handle:
+            return handle.read()
+
+    if not os.path.isdir(name):
+        raise Failure("%s is no folder" % name)
+    disk, meta, warnings = packed(read, name, options)
+    target_path = pack_target(name, target, meta.get("format", "dsk"))
+    target_format = format_of(target_path)
+    if target_format is None:
+        raise Failure("%s names no format: give a target whose extension is one of %s"
+            % (target_path, ", ".join(FORMATS)))
+    check_backup(target_path)
+    if options.volume is not None and meta.get("volume") is not None:
+        raise Failure("--volume can't be used with %s: it keeps the volume number of each"
+            " sector, as the address fields of its source had them" % name)
+    if options.volume is not None and target_format in SECTOR_FORMATS:
+        raise Failure(CONTRADICTIONS["volume-sectors"] % {"target": target_path,
+            "target_format": target_format})
+    if options.rate is not None and target_format != "hfe":
+        raise Failure(CONTRADICTIONS["rate"] % {"target": target_path})
+    options.rate = options.rate or DEFAULT_RATE_KBPS
+    what = "a folder of %d tracks" % len(disk.sectors)
+    if meta.get("file_system") == "dos33":
+        what += ", %s" % counted_things("file", sum(1 for record in meta.get("files", [])
+            if "sha1" in record))
+    lines = ["%s: %s" % (name, what)]
+    lines += ["  " + warning for warning in warnings]
+    try:
+        product = pack_product(disk, target_format, options, lines)
+    finally:
+        for line in lines:
+            say(line)
+    checked = ""
+    if options.verify:
+        problems = verify(product, target_format)
+        if problems:
+            say("%s: not written: read back, it would differ from the folder, which is a bug"
+                " in this tool:" % target_path)
+            for problem in problems:
+                say("  " + problem)
+            return 1
+        checked = "; verified: %d sectors as in the folder" % sum(
+            len(sectors) for sectors in product.expected)
+    say("%s: %s: %s%s" % (target_path, install(target_path, product.image, options.dry_run),
+        product.description, checked))
+    return 0
 
 def grouped(number):
     """A number with its digits grouped by apostrophes."""
@@ -1483,25 +2464,75 @@ def rate_number(text):
     return value
 
 
+VERB_CONTRADICTIONS = {
+    "unpack-volume": "--volume can't be used to unpack: a folder keeps the volume number of"
+        " each sector of a track image as its address field has it, and a sector image has"
+        " none. --volume sets it when a sector image's folder is packed into a .nib, .nic or"
+        " .hfe.",
+    "unpack-rate": "--rate can't be used to unpack: it sets the bit rate that an .hfe records,"
+        " and unpacking writes a folder.",
+    "pack-salvage": "--salvage can't be used to pack: a folder holds sectors already, every one"
+        " of them there. --salvage is for unpacking a .nib, .nic or .hfe whose sectors don't"
+        " all read.",
+}
+
+
+def unpack_jobs(paths, options):
+    """The images that the command line asks to unpack, checked against the options."""
+    if not paths:
+        raise UsageError("give the images to unpack")
+    for source in paths:
+        if format_of(source) is None:
+            raise UsageError("%s names no format this tool knows: an image's extension must be"
+                " one of %s" % (source, ", ".join(FORMATS)))
+        if options.salvage and format_of(source) in SECTOR_FORMATS:
+            raise UsageError(CONTRADICTIONS["salvage-sectors"] % {"source": source,
+                "source_format": format_of(source)})
+    if options.volume is not None:
+        raise UsageError(VERB_CONTRADICTIONS["unpack-volume"])
+    if options.rate is not None:
+        raise UsageError(VERB_CONTRADICTIONS["unpack-rate"])
+    return paths
+
+
+def pack_jobs(paths, options):
+    """The folder and the target, None for the folder's own, that the command line asks to
+    pack."""
+    if not 1 <= len(paths) <= 2:
+        raise UsageError("give one folder to pack, then the target, or just its extension, or"
+            " nothing for the image the folder came from")
+    if options.salvage:
+        raise UsageError(VERB_CONTRADICTIONS["pack-salvage"])
+    target = paths[1] if len(paths) == 2 else None
+    if target is not None and extension_alone(target) is None and format_of(target) is None:
+        raise UsageError("%s names no format: give a target whose extension is one of %s, or"
+            " just the extension" % (target, ", ".join(FORMATS)))
+    return [(paths[0], target)]
+
+
 EXIT_STATUS = """\
-Exit status: 0 when every image was converted, 1 when an image would have differed from its
+Exit status: 0 when every image or folder was written, 1 when one would have differed from its
 source and was not written, 2 on any other error."""
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog=PROGRAM, description=__doc__,
-        usage="%(prog)s [options] SOURCE... [[TARGET].]EXT",
+        usage="%(prog)s [options] SOURCE... [[TARGET].]EXT\n"
+            "       %(prog)s unpack [options] IMAGE...\n"
+            "       %(prog)s pack [options] FOLDER [[TARGET].]EXT",
         formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, width=LINE_WIDTH),
         epilog=EXIT_STATUS)
     parser.add_argument("paths", nargs="+", metavar="PATH",
-        help="the sources, then the target, or just its extension")
+        help="the sources, then the target, or just its extension; or unpack and the images;"
+            " or pack, the folder and the target")
     parser.add_argument("--volume", type=volume_number, metavar="N",
         help="the volume number to write into every address field of a disk made from a .dsk,"
             " .do or .po; by default, the one in the disk's DOS 3.3 catalog, else %d"
             % DEFAULT_VOLUME)
     parser.add_argument("--salvage", action="store_true",
-        help="when decoding a .nib, .nic or .hfe into a .dsk, .do, .po or .nic, write zeros for"
-            " the sectors that can't be read, and list them, instead of refusing")
+        help="when decoding a .nib, .nic or .hfe into a .dsk, .do, .po or .nic, or unpacking"
+            " it, write zeros for the sectors that can't be read, and list them, instead of"
+            " refusing")
     parser.add_argument("--rate", type=rate_number, metavar="KBPS",
         help="the bit rate to record in an .hfe, in kbit/s, default %d: FlashFloppy sends its"
             " cells at twice that rate, so %d gives the 4 us bits of a Disk II"
@@ -1510,21 +2541,32 @@ def main(argv=None):
         help="convert and verify, but write nothing")
     parser.add_argument("--no-verify", dest="verify", action="store_false",
         help="don't read the image back to compare it with the source")
-    options = parser.parse_args(argv)
+    # Options may stand anywhere, after unpack or pack too.
+    options = parser.parse_intermixed_args(argv)
     # A label in Cyrillic must not stop a message on a console that lacks the letters.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")
+    verb = options.paths[0] if options.paths[0] in ("unpack", "pack") else None
     try:
-        conversions = conversions_of(options.paths, options)
+        if verb == "unpack":
+            jobs = [(unpack, (source, options)) for source in unpack_jobs(options.paths[1:],
+                options)]
+        elif verb == "pack":
+            jobs = [(pack, (folder, target, options))
+                for folder, target in pack_jobs(options.paths[1:], options)]
+        else:
+            jobs = [(convert, (conversion, options))
+                for conversion in conversions_of(options.paths, options)]
     except UsageError as error:
         say("%s: %s" % (PROGRAM, error), sys.stderr)
         return 2
-    options.rate = options.rate or DEFAULT_RATE_KBPS
+    if verb != "pack":
+        options.rate = options.rate or DEFAULT_RATE_KBPS
     errors = unverified = 0
-    for conversion in conversions:
+    for job, arguments in jobs:
         try:
-            unverified += convert(conversion, options)
+            unverified += job(*arguments)
         except Failure as failure:
             errors += 1
             say("%s: %s" % (PROGRAM, failure), sys.stderr)
