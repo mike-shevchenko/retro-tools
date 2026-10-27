@@ -6,3 +6,6 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Files that pxfont.py unpacks fonts into.
+*.files/
