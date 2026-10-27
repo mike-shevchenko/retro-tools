@@ -1,5 +1,5 @@
 """
-Tests for apple2-disk-convert.py, on disks made up here, since the contents of real disks may
+Tests for apple2_disk_converter.py, on disks made up here, since the contents of real disks may
 be copyrighted:
 
 - A disk of made-up sectors, each holding its track and DOS 3.3 sector number, then bytes that
@@ -15,7 +15,6 @@ Run from the repository root as "python -m unittest discover tests".
 
 import contextlib
 import functools
-import importlib
 import io
 import json
 import os
@@ -29,7 +28,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-tool = importlib.import_module("apple2-disk-convert")
+import apple2_disk_converter as tool  # noqa: E402
 
 TRACK_BYTES = 16 * 256
 NIB_TRACK_BYTES = 6656
