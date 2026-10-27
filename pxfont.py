@@ -9,6 +9,7 @@ See pxfont --help.
 import argparse
 import codecs
 import collections
+import datetime
 import functools
 import io
 import json
@@ -269,6 +270,9 @@ TTF_NAMES = (("copyright", 0), ("family", 1), ("style", 2), ("unique_id", 3),
     ("designer_url", 12), ("license", 13), ("license_url", 14))
 STYLES = {(False, False): "Regular", (True, False): "Bold", (False, True): "Italic",
     (True, True): "Bold Italic"}
+# The time of creation and of change of every TrueType font made here, in seconds from
+# 1904-01-01: one date, the launch of ZX Spectrum, for the same glyphs to make the same file.
+FONT_TIME = int((datetime.datetime(1982, 4, 23) - datetime.datetime(1904, 1, 1)).total_seconds())
 # What a font name ends with: the style, and before it the size, as in "zx 6x8px Bold".
 NAME_STYLE = re.compile(r"(?i)( bold)?( italic)?$")
 NAME_SIZE = re.compile(r"(?i) (?:(\d+)x)?(\d+)px$")
@@ -2560,8 +2564,11 @@ def make_ttf(info, glyphs, cmap):
     builder.setupPost(isFixedPitch=int(fixed),
         underlinePosition=info["underline"][0] * units,
         underlineThickness=info["underline"][1] * units)
-    builder.font["head"].lowestRecPPEM = em
-    builder.font["head"].macStyle = (1 if bold else 0) | (2 if italic else 0)
+    head = builder.font["head"]
+    head.lowestRecPPEM = em
+    head.macStyle = (1 if bold else 0) | (2 if italic else 0)
+    head.created = head.modified = FONT_TIME
+    builder.font.recalcTimestamp = False
     # Bit 0 alone at every size asks for no smoothing.
     builder.font["gasp"] = gasp = newTable("gasp")
     gasp.version, gasp.gaspRange = 1, {0xFFFF: 0x0001}
