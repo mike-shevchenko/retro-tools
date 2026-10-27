@@ -46,6 +46,7 @@ pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N]
 pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack]
     FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
+pxfont merge [--codepage NAME] FONT FILE.ttf|DIR.files...
 
 unpack: write a 16-bit .fon file, a TrueType font drawn of pixels or a BDF font, as files to
   edit, into FILE.files/. It reports what is broken, and whether the files give the same font
@@ -60,6 +61,10 @@ bdf: make the font of DIR.bdf.files/; or make a Unicode BDF file of every font o
 expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph: "0,3,7".
 bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
   half of each cell a pixel to the right. These five write a new image, or directory and font.
+merge: make FONT.ttf and FONT.ttf.files/ of the glyphs of TrueType fonts, each char from the
+  first that has it, and the rest from the first font, named FONT. The cells of the fonts must
+  have as many rows above and below the baseline. It reports the chars of a font that an
+  earlier one has drawn otherwise.
 
 The files of a directory, for each font:
   fon.json, ttf.json or bdf.json: every field. One named _x is computed, and ignored when
@@ -4631,6 +4636,99 @@ def bold_italic(target, name, rows):
     return alter(target, name, rows, Change(bold=True, italic=True))
 
 
+def merged_source(path):
+    """What ttf.json stores of a TrueType font, of a file or of the files of a directory, and
+    the cells of its sheet; and what a message calls the font."""
+    source = path.rstrip("/\\")
+    advice = "merge takes TrueType fonts; the verb ttf makes one of another font"
+    if os.path.isdir(source):
+        where = shown_directory(source)
+        if not os.path.isfile(os.path.join(source, TTF_JSON)):
+            die("%s has no %s: %s" % (where, TTF_JSON, advice))
+        data = build_ttf_from(source)
+    elif os.path.isfile(source):
+        where = shown(source)
+        with open(source, "rb") as handle:
+            data = handle.read()
+        if data[:4] not in SFNT_MAGICS:
+            die("%s is not a TrueType font: %s" % (where, advice))
+    else:
+        die("%s is neither a TrueType font nor a directory of one" % shown(source))
+    model, _sheet, cells = parse_ttf(data, lambda message: note("Warning: " + message), where)
+    return where, model, cells
+
+
+def merge(target, name, sources):
+    """Write FONT.ttf and its files, FONT.ttf.files, of the glyphs of the sources: each char
+    from the first source that has it. The rest of the font is that of the first source,
+    renamed, its places 0..255 of the code page given, if one is."""
+    home, family = os.path.split(target.rstrip("/\\"))
+    if not family:
+        die("the name of the merged font is missing: %r" % target)
+    fonts = [merged_source(path) for path in sources]
+    where, model, cells = fonts[0]
+    rows = (model["rows_above_baseline"], model["rows_below_baseline"])
+    chars = parse_hex_ranges(model["chars"], "chars")
+    zero = parse_hex_ranges(model["zero_width"], "zero_width")
+    aliases, glyphs = dict(model["aliases"]), list(model["glyphs"])
+    told = ["%d char(s) of %s" % (len(chars | zero), where)]
+    # Each later source adds the chars that the font lacks, and the glyphs of other names.
+    for other_where, other, other_cells in fonts[1:]:
+        if (other["rows_above_baseline"], other["rows_below_baseline"]) != rows:
+            die("%s has %d row(s) above the baseline and %d below, but %s has %d and %d: the"
+                " cells of merged fonts must be alike" % ((where,) + rows + (other_where,
+                other["rows_above_baseline"], other["rows_below_baseline"])))
+        other_chars = parse_hex_ranges(other["chars"], "chars")
+        added, unlike = [], []
+        for code in sorted(other_chars | parse_hex_ranges(other["zero_width"], "zero_width")):
+            if code in chars or code in zero or "%04X" % code in aliases:
+                if code in chars and code in other_chars and (cells[code_key(code)]
+                        != other_cells[code_key(code)]):
+                    unlike.append(code)
+                continue
+            if code in other_chars:
+                chars.add(code)
+                cells[code_key(code)] = other_cells[code_key(code)]
+            else:
+                zero.add(code)
+            added.append(code)
+        for code, shared in other["aliases"].items():
+            if code not in aliases and int(code, 16) not in chars | zero and (
+                    int(shared, 16) in chars):
+                aliases[code] = shared
+        for glyph in other["glyphs"]:
+            if glyph not in glyphs:
+                glyphs.append(glyph)
+                cells[glyph] = other_cells[glyph]
+        told.append("%d char(s) of %s%s" % (len(added), other_where, "; these chars of it are"
+            " taken from an earlier font, which draws them otherwise: %s" % hex_ranges(unlike)
+            if unlike else ""))
+    model.update(chars=hex_ranges(chars), zero_width=hex_ranges(zero), aliases=aliases,
+        glyphs=glyphs)
+    if name:
+        model["codepage"] = name
+    names = model["names"]
+    style = names.get("style", STYLES[(model["bold"], model["italic"])])
+    # The texts that were made of the family of the first source are made of the new one.
+    was, now = made_names(names["family"], style), made_names(family, style)
+    for key, name_id in TTF_NAMES:
+        if name_id in was and names.get(key) == was[name_id]:
+            names[key] = now[name_id]
+    names["family"] = family
+    font = os.path.join(home, family + ".ttf")
+    directory = font + FILES_SUFFIX
+    check_backup(directory)
+    check_backup(font)
+    write_ttf_files(directory, model, ttf_sheet(chars, glyphs, page_of(model)), cells, family)
+    data = build_ttf_from(directory)
+    back_up(font)
+    with open(font, "wb") as handle:
+        handle.write(data)
+    print("Made %s and %s: %d char(s), of them\n%s." % (shown_directory(directory),
+        shown(font), len(chars | zero), ";\n".join("  " + line for line in told)))
+    return 0
+
+
 ALTERED = ("FILE.fon|FILE.ttf|FILE.bdf|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILES_SUFFIX,
     "the font file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
     "the code page of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
@@ -4669,6 +4767,10 @@ VERBS = (
     ("bold", bold) + ALTERED + (("rows",),),
     ("italic", italic) + ALTERED + (("rows",),),
     ("bold-italic", bold_italic) + ALTERED + (("rows",),),
+    ("merge", merge, "FONT", "the name of the merged font, as \"zx 8x8px\": FONT.ttf and"
+        " FONT.ttf%s are made" % FILES_SUFFIX,
+        "the code page of the places 0..255 in the bitmaps (default: the one of the first"
+        " source)", ("sources",)),
 )
 OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
@@ -4685,6 +4787,8 @@ OPTIONS = {
         " glyph of a missing char, or another char of the font",
     "columns": "the pixel columns of a glyph to repeat or to leave out, counted from 0, as"
         " 0,3,7",
+    "sources": "the TrueType fonts to merge, or the directories that unpack or ttf made of"
+        " them; a char that two of them have is taken from the first",
 }
 
 
@@ -4711,6 +4815,8 @@ def main():
                 help=OPTIONS[option])
         elif option == "unpack":
             parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
+        elif option == "sources":
+            parser.add_argument(option, metavar="SOURCE", nargs="+", help=OPTIONS[option])
         elif option != "columns":
             parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
     args = parser.parse_args(argv[1:])
