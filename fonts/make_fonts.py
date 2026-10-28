@@ -2,10 +2,11 @@
 """Rebuild the TrueType fonts of this directory with pxfont.py: the ZX fonts from their .psd
 sources, the Agat fonts from the charts of their glyphs.
 
-Each ZX font is made, then unpacked into FONT.ttf.files/ to check what it has. Each Agat chart
-is made into the files of a TrueType font by agat_font_converter.py, and those into the font;
-the three are then merged into one font of all their chars. A font and a directory that a run
-replaces are kept as .BAK; the .BAK of the run before is deleted.
+Each font is made, then unpacked into FONT.ttf.files/ to check what it has. An Agat chart is
+made into the files of a TrueType font by agat_font_converter.py, those into the font, and the
+three fonts are then merged into one of all their chars; the files that an Agat font is made
+of give way to those that it is unpacked into. A font and a directory that a run replaces are
+kept as .BAK; the .BAK of the run before is deleted.
 """
 
 import os
@@ -80,6 +81,15 @@ def run(command):
     return subprocess.run(command, cwd=HERE).returncode == 0
 
 
+def unpack_anew(pxfont, font):
+    """Unpack a font into FONT.files/ in place of the files that it was made of; whether that
+    succeeded."""
+    files = font + ".files"
+    if os.path.isdir(files):
+        shutil.rmtree(files)
+    return run(pxfont + ["unpack", font])
+
+
 def main():
     pxfont = find_script("pxfont")
     agat_font_converter = find_script("agat_font_converter")
@@ -95,20 +105,20 @@ def main():
         if not run(command + [source]):
             failed.append(source)
 
-    # The files that the converter makes are the source of a font, so pxfont.py cannot
-    # unpack the font into them for a check, as it does for the ZX fonts.
-    agat_files = []
+    agat_fonts = []
     for chart in AGAT_CHARTS:
         font = os.path.join(HERE, os.path.splitext(chart)[0] + AGAT_SIZE + ".ttf")
         remove_backups(font)
-        files = font + ".files"
-        if run(agat_font_converter + [chart]) and run(pxfont + ["ttf", files]):
-            agat_files.append(files)
+        if (run(agat_font_converter + [chart]) and run(pxfont + ["ttf", font + ".files"])
+                and unpack_anew(pxfont, font)):
+            agat_fonts.append(font)
         else:
             failed.append(chart)
-    if len(agat_files) == len(AGAT_CHARTS):
-        remove_backups(os.path.join(HERE, AGAT_MERGED + ".ttf"))
-        if not run(pxfont + ["merge", AGAT_MERGED] + agat_files):
+    if len(agat_fonts) == len(AGAT_CHARTS):
+        merged = os.path.join(HERE, AGAT_MERGED + ".ttf")
+        remove_backups(merged)
+        if not (run(pxfont + ["merge", AGAT_MERGED] + agat_fonts)
+                and unpack_anew(pxfont, merged)):
             failed.append(AGAT_MERGED)
 
     if failed:
