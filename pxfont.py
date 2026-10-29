@@ -48,6 +48,7 @@ pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack]
     FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 pxfont merge [--codepage NAME] FONT FILE.ttf|DIR.files...
+pxfont --win-install
 
 unpack: write a 16-bit .fon file, a TrueType font drawn of pixels or a BDF font, as files to
   edit, into FILE.files/. It reports what is broken, and whether the files give the same font
@@ -66,6 +67,8 @@ merge: make FONT.ttf and FONT.ttf.files/ of the glyphs of TrueType fonts, each c
   first that has it, and the rest from the first font, named FONT. The cells of the fonts must
   have as many rows above and below the baseline. It reports the chars of a font that an
   earlier one has drawn otherwise.
+--win-install: add "Unpack with pxfont" to the Explorer menu of .ttf files, for the current
+  user: it runs this file with this Python, in a console that stays open for the report.
 
 The files of a directory, for each font:
   fon.json, ttf.json or bdf.json: every field. One named _x is computed, and ignored when
@@ -4779,6 +4782,8 @@ VERBS = (
         "the code page of the places 0..255 in the bitmaps (default: the one of the first"
         " source)", ("sources",)),
 )
+WIN_MENU_KEY = r"Software\Classes\SystemFileAssociations\.ttf\shell\pxfont-unpack"
+WIN_MENU_TEXT = "Unpack with pxfont"
 OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
@@ -4799,11 +4804,36 @@ OPTIONS = {
 }
 
 
+def win_install():
+    """Add the Explorer menu entry that unpacks a .ttf file, for the current user."""
+    if sys.platform != "win32":
+        die("--win-install is for Windows")
+    # winreg exists on Windows alone.
+    import winreg
+    # Without the pause, the console would close as soon as the report is written.
+    command = (r'%SystemRoot%\System32\cmd.exe /c ""' + sys.executable + '" "'
+        + os.path.abspath(__file__) + '" unpack "%1" & pause"')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WIN_MENU_KEY) as key:
+        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, WIN_MENU_TEXT)
+        with winreg.CreateKey(key, "command") as command_key:
+            winreg.SetValueEx(command_key, "", 0, winreg.REG_EXPAND_SZ, command)
+    print('Added "%s" to the Explorer menu of .ttf files, for the current user: %s'
+        % (WIN_MENU_TEXT, command))
+    if Image is None or FontBuilder is None:
+        note("this Python lacks Pillow or fontTools, which unpack needs:"
+            " python -m pip install pillow fonttools")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
         sys.stdout.write(USAGE)
         return None
+    if argv[0] == "--win-install":
+        if argv[1:]:
+            die("--win-install takes no arguments")
+        return win_install()
     verbs = dict((verb[0], verb[1:]) for verb in VERBS)
     if argv[0] not in verbs:
         die("no verb %r; run pxfont --help for the list" % argv[0])
