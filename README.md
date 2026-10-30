@@ -1,8 +1,10 @@
 # retro-tools
 
-Various helper programs for retro-computing.
+Various helper programs and materials for retro-computing.
 
 (C) 2026 Mikhail Shevchenko, mike.shevchenko@gmail.com
+
+See [RELEASE.md](release.md) for the detailed description.
 
 ## License
 
