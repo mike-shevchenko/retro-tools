@@ -9,3 +9,6 @@ desktop.ini
 
 # Files that pxfont.py unpacks fonts into.
 *.files/
+
+fonts/BAK/
+release/
