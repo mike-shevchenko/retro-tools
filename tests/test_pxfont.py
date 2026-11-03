@@ -146,6 +146,16 @@ class BdfTest(unittest.TestCase):
         self.assertEqual(model["overrides"], {"32": {"STARTCHAR": "space"},
             "103": {"BBX": "4 6 0 -2"}, "other65": {"ENCODING": "65"}})
 
+    def test_transparent_slots_are_spaces_in_text(self):
+        status, output = self.run_verb(pxfont.unpack, self.path, None, None)
+        self.assertEqual(status, 0, output)
+        model = self.model()
+        path = os.path.join(self.path + ".files", model["txt"])
+        with open(path, encoding="ascii") as handle:
+            lines = handle.read().splitlines()
+        self.assertEqual(lines[9], "    |....")
+        self.assertEqual(pxfont.text_lines([[769]], {769: (0, [[]])}, 1, 4), ["    "])
+
     def test_edited_glyph_gets_new_box(self):
         self.run_verb(pxfont.unpack, self.path, None, None)
         files = self.path + ".files"
@@ -155,8 +165,8 @@ class BdfTest(unittest.TestCase):
         with open(text, encoding="ascii") as handle:
             lines = handle.read().splitlines()
         # The second row of chars has an empty place, then the A, whose top row is blank.
-        self.assertEqual(lines[9], "|....")
-        lines[9] = "|X..."
+        self.assertEqual(lines[9], "    |....")
+        lines[9] = "    |X..."
         with open(text, "w", encoding="ascii", newline="\n") as handle:
             handle.write("\n".join(lines) + "\n")
         status, output = self.run_verb(pxfont.bdf, files, None, None, None, False)

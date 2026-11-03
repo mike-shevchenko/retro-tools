@@ -1057,11 +1057,11 @@ def read_png_grid(path, image, sheet, width, height):
     return [width] * len(glyphs), glyphs
 
 
-def text_lines(sheet, cells, height, bare=None):
+def text_lines(sheet, cells, height, gap, bare=None):
     lines, before = [], None
     for row in sheet:
-        body = [CHAR_SEPARATOR.join("" if key is None else "".join(
-            INK if bit else NO_PAPER if key == bare else PAPER
+        body = [CHAR_SEPARATOR.join(NO_PAPER * gap if key is None or not cells[key][0]
+            else "".join(INK if bit else NO_PAPER if key == bare else PAPER
             for bit in cells[key][1][y]) for key in row) for y in range(height)]
         if before is not None:
             lines.append(ROW_SEPARATOR * max(before, len(body[0])))
@@ -1070,7 +1070,7 @@ def text_lines(sheet, cells, height, bare=None):
     return lines
 
 
-def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
+def read_text(path, sheet, zero, height, plain, bare=None, gap=None):
     """The widths and glyphs a text file holds, in the order of the keys of the sheet. The
     lines of dashes between the rows of chars may be left out, and so may the separators of
     chars when all chars are equally wide. Without a height given, the chars are as high as
@@ -1102,7 +1102,7 @@ def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
     width = None
     widths, glyphs, later = [], [], None
     for row, top in zip(sheet, tops):
-        cells = [[] for _key in row]
+        cells = [[[] for _y in range(height)] if key in zero else [] for key in row]
         for y in range(height):
             where = "%s:%d" % (shown(path), top + y + 1)
             line = lines[top + y]
@@ -1112,7 +1112,7 @@ def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
                 if width is None:
                     width = plain_width(where, len(line), len(row), plain, "characters",
                         "the %s between chars" % CHAR_SEPARATOR)
-                if row[-1] == bare:
+                if row[-1] is None or row[-1] in zero or row[-1] == bare:
                     line = line.ljust(len(row) * width)
                 if len(line) != len(row) * width:
                     die("%s: is %d characters wide, but %d chars %d wide take %d"
@@ -1122,9 +1122,14 @@ def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
                 die("%s: has %d chars, not %d" % (where, len(parts), len(row)))
             for slot, (key, part, cell) in enumerate(zip(row, parts, cells)):
                 if key is None:
-                    if part.strip(PAPER):
+                    if part.strip(PAPER + NO_PAPER):
                         die("%s: has %r in slot %d of the row, where the font has no char"
                             % (where, part, row.index(None, len(cell)) + 1))
+                    continue
+                if key in zero:
+                    if part.strip(NO_PAPER):
+                        die("%s: %s has no width, so its place must be spaces, not %r"
+                            % (where, key_label(key), part))
                     continue
                 if key == bare and slot == len(row) - 1:
                     if part.strip(INK + PAPER + NO_PAPER):
@@ -1158,8 +1163,9 @@ def read_text(path, sheet, _zero, height, plain, bare=None, gap=None):
         glyphs[at] = [[int(mark == INK) for mark in part.ljust(wide)] for part in parts]
     for index, at in enumerate(dashes):
         longer = max(len(lines[at - 1]), len(lines[at + 1]))
-        # Around the row of the cell without paper, the spaces that end a line may be lost.
-        loose = bare is not None and bare in sheet[index] + sheet[index + 1]
+        # Where a cell is transparent, the spaces that end a line may be lost.
+        loose = any(key is None or key in zero or key == bare
+            for key in sheet[index] + sheet[index + 1])
         if len(lines[at]) != longer and not (loose and len(lines[at]) > longer):
             die("%s:%d: must be a line of %d dashes, as long as the longer of the rows of"
                 " chars around it" % (shown(path), at + 1, longer))
@@ -2089,8 +2095,8 @@ def write_files(directory, data, report):
         cells = dict(zip(range(first, first + len(glyphs)), zip(widths, glyphs)))
         bare = bare_cell(cells, default_place(header),
             header["dfPixWidth"] or header["dfAvgWidth"])
+        gap = header["dfPixWidth"] or header["dfAvgWidth"] or max(widths)
         if font["png"]:
-            gap = header["dfPixWidth"] or header["dfAvgWidth"] or max(widths)
             chars = CHARSET_ENCODINGS.get(header["dfCharSet"], encoding)
             path = os.path.join(directory, font["png"])
             write_png(path, sheet, cells, height, gap, bare)
@@ -2099,7 +2105,7 @@ def write_files(directory, data, report):
                 "%02X" % code), bare)
         with open(os.path.join(directory, font["txt"]), "w", encoding="ascii",
                 newline="\n") as handle:
-            handle.write("\n".join(text_lines(sheet, cells, height, bare)) + "\n")
+            handle.write("\n".join(text_lines(sheet, cells, height, gap, bare)) + "\n")
         try:
             made = fnt_bytes(font, widths, glyphs)
         except Failure as failure:
@@ -3125,7 +3131,7 @@ def write_cell_files(directory, json_name, model, sheet, cells, base, bare, lege
     write_svg(os.path.join(directory, base + ".svg"), sheet, cells, height, gap, legend, bare)
     with open(os.path.join(directory, model["txt"]), "w", encoding="ascii",
             newline="\n") as handle:
-        handle.write("\n".join(text_lines(sheet, cells, height, bare)) + "\n")
+        handle.write("\n".join(text_lines(sheet, cells, height, gap, bare)) + "\n")
     with open(os.path.join(directory, json_name), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(json_text(model) + "\n")
 
@@ -4388,7 +4394,7 @@ def alter_file(path, rows, change):
         cells = dict(zip(sheet_keys(sheet), ((new_width, glyph) for glyph in changed)))
         back_up(target)
         with open(target, "w", encoding="ascii", newline="\n") as handle:
-            handle.write("\n".join(text_lines(sheet, cells, height,
+            handle.write("\n".join(text_lines(sheet, cells, height, new_width,
                 bare_cell(cells, NEW_DEFAULT_CHAR, new_width))) + "\n")
     else:
         image = change.image(Image.open(path), width, height, glyphs)
