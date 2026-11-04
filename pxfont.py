@@ -40,11 +40,12 @@ except ImportError:
 USAGE = """\
 Usage:
 pxfont unpack [--codepage NAME] [--codepage-patches LIST] FILE.fon|FILE.ttf|FILE.bdf
-pxfont fon [--codepage NAME] [--rows N] [--unpack] DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
+pxfont fon [--codepage NAME] [--rows N] [--unpack] [--invert]
+    DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont create [--codepage NAME] FONT
 pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N] [--rows N]
-    [--unpack] FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
-pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack]
+    [--unpack] [--invert] FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
+pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack] [--invert]
     FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 pxfont merge [--codepage NAME] FONT FILE.ttf|DIR.files...
@@ -82,8 +83,9 @@ The files of a directory, for each font:
     stale.
 
 A fixed-pitch font may have plainer bitmaps: text without the `|` and the dashes, and a PNG
-  or a Photoshop .psd in any colors. Its first cell, blank, tells the paper: a color within
-  64 of it in every channel is paper, 120 or more away in some is ink; transparent is paper.
+  or a Photoshop .psd in any colors. The prevailing color of its first cell tells the paper:
+  a color within 64 of it in every channel is paper, 120 or more away in some is ink;
+  transparent is paper. --invert swaps the classification.
 
 Bitmaps alone: the file is named as the font, "zx 6x8px Bold.png". The size in the name
   tells the rows, or --rows N does: 7 unless told, the chars 32..255. E, F, H, L, T and Z
@@ -109,6 +111,8 @@ BDF: a cell is as wide as the advance, DWIDTH, and as high as the line, FONT_ASC
   U+00A3.
 --aliases 00A9=.notdef,00A3=0060,2191=005E: ttf adds chars that show .notdef or another char.
 --unpack: fon, ttf and bdf then unpack the font that they made, into FILE.files/, for a check.
+--invert: for standalone PNG or Photoshop bitmaps, swap ink and paper; a first cell of one
+  color is blank without it, and ink with it.
 """
 
 JSON_NAME = "fon.json"
@@ -131,7 +135,8 @@ CELL_COLORS = (
 )
 CLEAR = (0, 0, 0, 0)
 FULL_COLORING = frozenset(CELL_COLORS[0] + CELL_COLORS[1])
-# A PNG in other colors takes the color of its first char, which must be blank, for paper.
+# A PNG in other colors takes the prevailing color of its first cell for paper. The cell must
+# be one of these places, which may be blank in the sheet.
 # How far a color is from it, at most to be paper as well and at least to be ink, is counted
 # in the channel that differs most; between the two a color is neither.
 CODE_PREFIX = "U+"
@@ -860,7 +865,7 @@ def full_coloring(opaque):
         blue in opaque or black not in opaque)
 
 
-def read_png(path, sheet, zero, height, plain, bare=None, gap=None):
+def read_png(path, sheet, zero, height, plain, bare=None, gap=None, invert=False):
     """The widths and glyphs a PNG holds, in the order of the keys of the sheet. Without a
     height given, the chars are as high as the image makes them. bare is the key of the
     cell that may be without paper, and gap is how wide the chars usually are."""
@@ -879,14 +884,16 @@ def read_png(path, sheet, zero, height, plain, bare=None, gap=None):
     # The full coloring shows by its colors alone. Any other image is a grid of equal cells.
     if full_coloring(set(color for _count, color
             in image.getcolors(image.size[0] * image.size[1]) if color[3])):
+        if invert:
+            die(INVERT_MISPLACED)
         return read_png_cells(path, image, sheet, zero, height, bare, gap)
     width = plain_width(shown(path), image.size[0], max(len(row) for row in sheet), plain,
         "pixels", "the full coloring")
     if sheet[0][0] is not None and sheet[0][0] not in BLANK_FIRST_CHARS:
         die("%s is without the full coloring, and its paper is then told by its first cell,"
-            " which has to be blank: one of no char, of char 0 or of the space; this one"
-            " holds %s" % (shown(path), key_label(sheet[0][0])))
-    return read_png_grid(path, image, sheet, width, height)
+            " which must be one of no char, of char 0 or of the space; this one holds %s"
+            % (shown(path), key_label(sheet[0][0])))
+    return read_png_grid(path, image, sheet, width, height, invert)
 
 
 def plain_width(where, length, chars, plain, units, missing):
@@ -1009,18 +1016,13 @@ def color_distance(color, paper):
     return (most * color[3] + 127) // 255
 
 
-def read_png_grid(path, image, sheet, width, height):
+def read_png_grid(path, image, sheet, width, height, invert=False):
     """The widths and glyphs of a PNG without the full coloring: only its size tells the
-    chars apart, so all are equally wide. The first cell is blank, and its color is the
+    chars apart, so all are equally wide. The prevailing color of the first cell is the
     paper; any other color is paper or ink by its distance from that one."""
     pixels = image.load()
-    paper = pixels[0, 0]
-    for y in range(height):
-        for x in range(width):
-            if pixels[x, y] != paper:
-                die("%s: its first cell must be blank, for its color to tell the paper, but"
-                    " the pixel at %d,%d is %s and the one at 0,0 is %s"
-                    % (shown(path), x, y, color_name(pixels[x, y]), color_name(paper)))
+    colors = collections.Counter(pixels[x, y] for y in range(height) for x in range(width))
+    paper = colors.most_common(1)[0][0]
     kinds = {}
 
     def inked(x, y):
@@ -1034,7 +1036,7 @@ def read_png_grid(path, image, sheet, width, height):
                     color_name(color), color_name(paper), distance, PAPER_DISTANCE,
                     INK_DISTANCE))
             kinds[color] = int(distance >= INK_DISTANCE)
-        return kinds[color]
+        return kinds[color] ^ invert
 
     glyphs = []
     for r, row in enumerate(sheet):
@@ -1050,10 +1052,11 @@ def read_png_grid(path, image, sheet, width, height):
         if any(inked(x, y) for y in range(image.size[1] - height, image.size[1])):
             die("%s: there is ink right of the last char" % shown(path))
     inks = sum(kinds.values())
-    print("%s: the paper is %s, as the first cell has it%s; the ink is %s."
+    print("%s: the paper is %s, as the prevailing color of its first cell%s; the ink is %s%s."
         % (shown(path), color_name(paper), ", and %d more color(s) close to it"
         % (len(kinds) - inks - 1) if len(kinds) - inks > 1 else "",
-        "%d color(s) far from it" % inks if inks else "nowhere"))
+        "%d color(s) far from it" % inks if inks else "nowhere",
+        "; --invert swaps ink and paper" if invert else ""))
     return [width] * len(glyphs), glyphs
 
 
@@ -2183,6 +2186,7 @@ def fon_path_of(directory):
 
 
 UNPACK_MISPLACED = "--unpack is not for %s: it would be unpacked over the files it is made of"
+INVERT_MISPLACED = "--invert is for standalone PNG or Photoshop bitmaps without full coloring"
 
 
 def is_fnt(target):
@@ -2226,9 +2230,11 @@ def fon_of_fnt(path, name):
         first, last, header["dfPoints"], header["dfPixHeight"]))
 
 
-def fon(target, name, rows, then_unpack):
+def fon(target, name, rows, then_unpack, invert=False):
     if is_bitmaps(target) or is_fnt(target):
-        return fon_bitmaps(target, name, rows, then_unpack)
+        return fon_bitmaps(target, name, rows, then_unpack, invert)
+    if invert:
+        die(INVERT_MISPLACED)
     if rows is not None:
         die(ROWS_MISPLACED)
     if then_unpack:
@@ -2342,12 +2348,15 @@ def named_size(where, width, height):
     return width, height
 
 
-def lone_bitmaps(path, rows):
+def lone_bitmaps(path, rows, invert=False):
     """The bitmaps of a file that holds them alone, the chars of one fixed-pitch font from
     32 on: the stem of the font name that the file has, whether the name says bold and
     italic, the codes, the width and the height of a char, and the glyphs."""
     base, extension = os.path.splitext(path)
-    reader = read_text if extension.lower() == ".txt" else read_png
+    if invert and extension.lower() == ".txt":
+        die(INVERT_MISPLACED)
+    reader = read_text if extension.lower() == ".txt" else functools.partial(read_png,
+        invert=invert)
     stem, named_width, named_height, bold, italic = split_name(os.path.basename(base))
     named_size(shown(path), named_width, named_height)
     if not os.path.isfile(path):
@@ -2387,11 +2396,11 @@ def lone_bitmaps(path, rows):
     return stem, bold, italic, codes, width, height, glyphs
 
 
-def fon_of_bitmaps(path, name, rows):
+def fon_of_bitmaps(path, name, rows, invert=False):
     """The file of one fixed-pitch font that its bitmaps alone make, and what the font is.
     The name of the file is the name of the font: its style, and its size if it has one."""
     set_encoding(name or DEFAULT_ENCODING)
-    stem, bold, italic, codes, width, height, glyphs = lone_bitmaps(path, rows)
+    stem, bold, italic, codes, width, height, glyphs = lone_bitmaps(path, rows, invert)
     family = (stem + " %dx%dpx" % (width, height)).strip()
     ascent, leading = letter_rows(shown(path), codes, glyphs, height)
     model, points = new_model(family, os.path.basename(os.path.splitext(path)[0]) + ".fon",
@@ -2403,7 +2412,7 @@ def fon_of_bitmaps(path, name, rows):
         leading))
 
 
-def fon_bitmaps(path, name, rows, then_unpack):
+def fon_bitmaps(path, name, rows, then_unpack, invert=False):
     """Make a file of one font from its bitmaps alone or from its .fnt file, and unpack it
     if told."""
     target = os.path.splitext(path)[0] + ".fon"
@@ -2412,7 +2421,10 @@ def fon_bitmaps(path, name, rows, then_unpack):
         check_backup(target + FILES_SUFFIX)
     if is_fnt(path) and rows is not None:
         die(ROWS_MISPLACED)
-    data, what = fon_of_fnt(path, name) if is_fnt(path) else fon_of_bitmaps(path, name, rows)
+    if is_fnt(path) and invert:
+        die(INVERT_MISPLACED)
+    data, what = fon_of_fnt(path, name) if is_fnt(path) else fon_of_bitmaps(path, name, rows,
+        invert)
     for font, widths, glyphs, _where in parse_fon(data, Report(quiet=True))[1]:
         chars = CodePage(CHARSET_ENCODINGS.get(font["header"]["dfCharSet"], encoding))
         uncoded = uncoded_chars(font, widths, glyphs, chars)
@@ -3301,13 +3313,15 @@ def ttf_of_files(directory, em, aliases, patches, then_unpack):
     return 0
 
 
-def fon_fonts(target, name, rows, kind):
+def fon_fonts(target, name, rows, kind, invert=False):
     """The fonts of a .fon file, of the directory that unpack made of one, of bitmaps alone
     or of a .fnt file, to make fonts of the kind of, with the file that the new fonts are
     put beside, and the report of the errors of the .fon file."""
     source = target
     if is_bitmaps(target):
-        data = fon_of_bitmaps(target, name, rows)[0]
+        data = fon_of_bitmaps(target, name, rows, invert)[0]
+    elif invert:
+        die(INVERT_MISPLACED)
     elif rows is not None:
         die(ROWS_MISPLACED)
     elif is_fnt(target):
@@ -3411,23 +3425,27 @@ def ttf_of_bdf(data, source, name, em, places, then_unpack):
     return unpack_file(path, page.name, page.patches) if then_unpack else 0
 
 
-def ttf(target, name, rows, em, aliases, patches, then_unpack):
+def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False):
     need_fonttools()
     if em is not None and em < 1:
         die("--em must be 1 or more pixels")
     pairs = parse_aliases(aliases) if aliases is not None else []
     places = parse_patches(patches) if patches is not None else {}
     if os.path.isfile(os.path.join(target, TTF_JSON)):
+        if invert:
+            die(INVERT_MISPLACED)
         return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack)
     found = None if is_bitmaps(target) or is_fnt(target) else bdf_source(target)
     if found:
+        if invert:
+            die(INVERT_MISPLACED)
         if rows is not None:
             die(ROWS_MISPLACED)
         if aliases is not None:
             die("--aliases is for the fonts of a .fon file; a BDF font has its chars by its"
                 " codes")
         return ttf_of_bdf(found[0], found[1], name, em, places, then_unpack)
-    fonts, source, report = fon_fonts(target, name, rows, "a TrueType")
+    fonts, source, report = fon_fonts(target, name, rows, "a TrueType", invert)
     targets = ttf_targets(source, fonts)
     for path, _family, _style in targets:
         check_backup(path)
@@ -4192,7 +4210,7 @@ def bdf_of_font(font, widths, glyphs, page, family, style):
     return model, cells
 
 
-def bdf(target, name, rows, patches, then_unpack):
+def bdf(target, name, rows, patches, then_unpack, invert=False):
     """Make the BDF font of the files that unpack wrote of one, or a Unicode BDF font of
     each font of a .fon file, of the directory that unpack made of one, of bitmaps alone or
     of a .fnt file."""
@@ -4201,6 +4219,8 @@ def bdf(target, name, rows, patches, then_unpack):
         die("%s holds a TrueType font; a BDF font is not made of one"
             % shown_directory(directory))
     if os.path.isfile(os.path.join(directory, BDF_JSON)):
+        if invert:
+            die(INVERT_MISPLACED)
         return bdf_of_files(directory, name, rows, patches, then_unpack)
     places = parse_patches(patches) if patches is not None else {}
     if not is_bitmaps(target) and not is_fnt(target) and os.path.isfile(target):
@@ -4208,7 +4228,7 @@ def bdf(target, name, rows, patches, then_unpack):
             if is_bdf_data(handle.read()):
                 die("%s is a BDF font already; unpack it, and bdf makes it again of the files"
                     % shown(target))
-    fonts, source, report = fon_fonts(target, name, rows, "a BDF")
+    fonts, source, report = fon_fonts(target, name, rows, "a BDF", invert)
     targets = ttf_targets(source, fonts, ".bdf")
     for path, _family, _style in targets:
         check_backup(path)
@@ -4763,7 +4783,7 @@ VERBS = (
         "the directory that unpack made of a .fon file, the bitmaps of one fixed-pitch font,"
         " or one font as a .fnt file",
         "the code page to write the texts in (default: the one %s records, or %s without it)"
-        % (JSON_NAME, DEFAULT_ENCODING), ("rows", "unpack")),
+        % (JSON_NAME, DEFAULT_ENCODING), ("rows", "unpack", "invert")),
     ("create", create, "FONT", "the name of the font, as \"zx 6x8px\"; the directory is"
         " FONT.fon%s" % FILES_SUFFIX,
         "the code page to write the texts in (default: %s)" % DEFAULT_ENCODING, ()),
@@ -4772,12 +4792,12 @@ VERBS = (
         " font file, the bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names, or for a BDF font that is not of Unicode, its registry)",
-        ("rows", "em", "aliases", "patches", "unpack")),
+        ("rows", "em", "aliases", "patches", "unpack", "invert")),
     ("bdf", bdf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
         "the .fon file, the directory that unpack made of a .fon file or of a BDF font, the"
         " bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
-        " dfCharSet names)", ("rows", "patches", "unpack")),
+        " dfCharSet names)", ("rows", "patches", "unpack", "invert")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
@@ -4799,6 +4819,8 @@ OPTIONS = {
         " of NBSP may be taken too, as A0=2191: NBSP then shows the glyph of the space",
     "unpack": "then unpack each font file that is made, into FILE%s, as the verb unpack"
         " does: to check what the font has" % FILES_SUFFIX,
+    "invert": "for standalone PNG or Photoshop bitmaps without full coloring: swap ink and"
+        " paper; a first cell of one color is blank without this, and ink with it",
     "aliases": "more Unicode chars for the glyphs of the font, as"
         " 00A9=.notdef,U+00A3=0060,2191=005E for the copyright sign, the pound and the up"
         " arrow of ZX Spectrum: each is a char, then what gives it the glyph: .notdef for the"
@@ -4856,7 +4878,7 @@ def main():
         elif option == "patches":
             parser.add_argument("--codepage-patches", dest=option, metavar="LIST",
                 help=OPTIONS[option])
-        elif option == "unpack":
+        elif option in ("unpack", "invert"):
             parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
         elif option == "sources":
             parser.add_argument(option, metavar="SOURCE", nargs="+", help=OPTIONS[option])

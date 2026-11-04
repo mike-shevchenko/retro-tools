@@ -14,6 +14,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -212,6 +213,53 @@ class BdfTest(unittest.TestCase):
         path = self.write("tall.bdf", TINY.replace("CHARS 6", "METRICSSET 1\nCHARS 6"))
         with self.assertRaises(pxfont.Failure):
             self.run_verb(pxfont.unpack, path, None, None)
+
+
+@unittest.skipIf(pxfont.Image is None, "pxfont needs Pillow")
+class BitmapTest(unittest.TestCase):
+    WHITE = pxfont.CELL_COLORS[0][0]
+    GRAY = pxfont.CELL_COLORS[1][0]
+    BLACK = pxfont.CELL_COLORS[1][1]
+
+    def test_nonblank_first_cell_gives_prevailing_paper(self):
+        image = pxfont.Image.new("RGBA", (4, 2), self.WHITE)
+        pixels = image.load()
+        for y in range(2):
+            for x in range(2, 4):
+                pixels[x, y] = self.GRAY
+        pixels[0, 1] = self.BLACK
+        pixels[3, 0] = self.BLACK
+        widths, glyphs = pxfont.read_png_grid("test.png", image, [[32, 33]], 2, 2)
+        self.assertEqual(widths, [2, 2])
+        self.assertEqual(glyphs, [[[0, 0], [1, 0]], [[0, 1], [0, 0]]])
+
+    def test_invert_swaps_the_heuristic_result(self):
+        image = pxfont.Image.new("RGBA", (2, 2), self.BLACK)
+        image.load()[0, 0] = self.WHITE
+        _widths, glyphs = pxfont.read_png_grid("test.png", image, [[32]], 2, 2)
+        self.assertEqual(glyphs[0], [[1, 0], [0, 0]])
+        _widths, glyphs = pxfont.read_png_grid("test.png", image, [[32]], 2, 2, True)
+        self.assertEqual(glyphs[0], [[0, 1], [1, 1]])
+
+    def test_single_color_first_cell_is_blank_or_ink(self):
+        image = pxfont.Image.new("RGBA", (2, 2), self.WHITE)
+        _widths, glyphs = pxfont.read_png_grid("test.png", image, [[32]], 2, 2)
+        self.assertEqual(glyphs[0], [[0, 0], [0, 0]])
+        _widths, glyphs = pxfont.read_png_grid("test.png", image, [[32]], 2, 2, True)
+        self.assertEqual(glyphs[0], [[1, 1], [1, 1]])
+
+    def test_invert_option(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "inverse.png")
+            image = pxfont.Image.new("RGBA", (64, 2), self.WHITE)
+            image.load()[0, 1] = self.BLACK
+            image.save(path)
+            result = subprocess.run([sys.executable, pxfont.__file__, "fon", "--rows", "1",
+                "--invert", path], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with open(os.path.splitext(path)[0] + ".fon", "rb") as handle:
+                fonts = pxfont.parse_fon(handle.read(), pxfont.Report(quiet=True))[1]
+            self.assertEqual(fonts[0][2][0], [[1, 1], [0, 1]])
 
 
 def unicode_bdf(family, glyphs, ascent=5):
