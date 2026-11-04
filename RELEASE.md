@@ -1,6 +1,14 @@
-# What's new
+# What's new in 1.1 vs 1.0
 
-- ZX Cyr 6x8px: reduce height of parentheses and brackets to match the one of the ZX Spectrum font.
+At a glance: **"ZX Cyr 6x8px.ttf"** - parentheses and brackets made smaller, as in ZX Spectrum font; **pxfont.py** - small improvements.
+
+Commits since v1.0:
+```
+pxfont: register Windows context menu "Unpack..." for .fon and .bdf files
+pxfont: do not require blank glyph at #0 for plain source image; add --invert flag
+pxfont: preserve transparent cells in text output
+fonts: fix ZX Cyr 6x8px: reduce height of parentheses and brackets to match one of ZX Spectrum font
+```
 
 # Contents
 
