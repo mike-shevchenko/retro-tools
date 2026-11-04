@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -260,6 +261,31 @@ class BitmapTest(unittest.TestCase):
             with open(os.path.splitext(path)[0] + ".fon", "rb") as handle:
                 fonts = pxfont.parse_fon(handle.read(), pxfont.Report(quiet=True))[1]
             self.assertEqual(fonts[0][2][0], [[1, 1], [0, 1]])
+
+
+class WinInstallTest(unittest.TestCase):
+
+    def test_registers_all_font_extensions(self):
+        registry = mock.Mock()
+        registry.HKEY_CURRENT_USER = object()
+        registry.REG_SZ = 1
+        registry.REG_EXPAND_SZ = 2
+        key, command_key = mock.MagicMock(), mock.MagicMock()
+        key.__enter__.return_value = key
+        command_key.__enter__.return_value = command_key
+        registry.CreateKey.side_effect = [key, command_key] * 3
+        with mock.patch.dict(sys.modules, {"winreg": registry}), mock.patch.object(
+                pxfont.sys, "platform", "win32"):
+            status, output = run_verb(pxfont.win_install)
+        self.assertEqual(status, 0, output)
+        keys = registry.CreateKey.call_args_list
+        self.assertEqual([call.args[1] for call in keys[::2]],
+            [pxfont.WIN_MENU_KEY % extension for extension in pxfont.WIN_MENU_EXTENSIONS])
+        self.assertEqual([call.args[1] for call in keys[1::2]], ["command"] * 3)
+        values = registry.SetValueEx.call_args_list
+        self.assertEqual([call.args[0] for call in values], [key, command_key] * 3)
+        for extension in pxfont.WIN_MENU_EXTENSIONS:
+            self.assertIn(extension, output)
 
 
 def unicode_bdf(family, glyphs, ascent=5):

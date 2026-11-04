@@ -68,8 +68,8 @@ merge: make FONT.ttf and FONT.ttf.files/ of the glyphs of TrueType fonts, each c
   first that has it, and the rest from the first font, named FONT. The cells of the fonts must
   have as many rows above and below the baseline. It reports the chars of a font that an
   earlier one has drawn otherwise.
---win-install: add "Unpack with pxfont" to the Explorer menu of .ttf files, for the current
-  user: it runs this file with this Python, in a console that stays open for the report.
+--win-install: add "Unpack with pxfont" to the Explorer menu of .ttf, .fon, .bdf files, for the
+  current user: it runs this file with this Python, in a console that stays open for the report.
 
 The files of a directory, for each font:
   fon.json, ttf.json or bdf.json: every field. One named _x is computed, and ignored when
@@ -4808,7 +4808,8 @@ VERBS = (
         "the code page of the places 0..255 in the bitmaps (default: the one of the first"
         " source)", ("sources",)),
 )
-WIN_MENU_KEY = r"Software\Classes\SystemFileAssociations\.ttf\shell\pxfont-unpack"
+WIN_MENU_EXTENSIONS = (".ttf", ".fon", ".bdf")
+WIN_MENU_KEY = r"Software\Classes\SystemFileAssociations\%s\shell\pxfont-unpack"
 WIN_MENU_TEXT = "Unpack with pxfont"
 OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
@@ -4833,7 +4834,7 @@ OPTIONS = {
 
 
 def win_install():
-    """Add the Explorer menu entry that unpacks a .ttf file, for the current user."""
+    """Add the Explorer menu entry that unpacks a font file, for the current user."""
     if sys.platform != "win32":
         die("--win-install is for Windows")
     # winreg exists on Windows alone.
@@ -4841,12 +4842,13 @@ def win_install():
     # Without the pause, the console would close as soon as the report is written.
     command = (r'%SystemRoot%\System32\cmd.exe /c ""' + sys.executable + '" "'
         + os.path.abspath(__file__) + '" unpack "%1" & pause"')
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WIN_MENU_KEY) as key:
-        winreg.SetValueEx(key, "", 0, winreg.REG_SZ, WIN_MENU_TEXT)
-        with winreg.CreateKey(key, "command") as command_key:
-            winreg.SetValueEx(command_key, "", 0, winreg.REG_EXPAND_SZ, command)
-    print('Added "%s" to the Explorer menu of .ttf files, for the current user: %s'
-        % (WIN_MENU_TEXT, command))
+    for extension in WIN_MENU_EXTENSIONS:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WIN_MENU_KEY % extension) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, WIN_MENU_TEXT)
+            with winreg.CreateKey(key, "command") as command_key:
+                winreg.SetValueEx(command_key, "", 0, winreg.REG_EXPAND_SZ, command)
+        print('Added "%s" to the Explorer menu of %s files, for the current user: %s'
+            % (WIN_MENU_TEXT, extension, command))
     if Image is None or FontBuilder is None:
         note("this Python lacks Pillow or fontTools, which unpack needs:"
             " python -m pip install pillow fonttools")
