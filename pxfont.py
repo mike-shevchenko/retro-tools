@@ -2891,9 +2891,11 @@ def pixel_unit(values, em_units):
     if not total:
         return None
 
-    def near(size):
+    def near(size, tolerance=None):
+        if tolerance is None:
+            tolerance = GRID_NEAR * size
         return sum(count for value, count in counts.items()
-            if abs(value - size * round(value / size)) <= GRID_NEAR * size) / total
+            if abs(value - size * round(value / size)) <= tolerance) / total
 
     # A value on a line of the grid adds 1, one halfway between two lines takes 1 away.
     scores = dict((size, sum(count * math.cos(2 * math.pi * value / size)
@@ -2909,7 +2911,7 @@ def pixel_unit(values, em_units):
     if near(unit) < GRID_SHARE:
         return None
     return max(times * unit for times in range(1, max(counts) // unit + 1)
-        if near(times * unit) >= GRID_SHARE)
+        if near(times * unit, GRID_NEAR * unit) >= GRID_SHARE)
 
 
 def outline_edges(contour, unit):

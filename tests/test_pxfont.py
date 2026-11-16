@@ -310,6 +310,13 @@ OTHER_B_ROWS = ["F0", "90", "E0", "90", "F0", "00"]
 ZHE_ROWS = ["A0", "A0", "40", "A0", "A0", "00"]
 
 
+class PixelUnitTest(unittest.TestCase):
+
+    def test_coarse_grid_keeps_the_fine_grid_tolerance(self):
+        values = list(range(100, 1500, 100)) + [7400]
+        self.assertEqual(pxfont.pixel_unit(values, 800), 100)
+
+
 @unittest.skipIf(pxfont.Image is None or pxfont.FontBuilder is None,
     "pxfont needs Pillow and fontTools")
 class MergeTest(unittest.TestCase):
