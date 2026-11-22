@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unicodedata
@@ -50,7 +51,7 @@ pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N]
     FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack] [--invert]
     FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
-pxfont diff FIRST.png|FIRST.psd SECOND.png|SECOND.psd
+pxfont diff [--open] FIRST.png|FIRST.psd SECOND.png|SECOND.psd
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 pxfont merge [--codepage NAME] FONT FILE.ttf|DIR.files...
 pxfont --win-install
@@ -122,6 +123,7 @@ BDF: a cell is as wide as the advance, DWIDTH, and as high as the line, FONT_ASC
   color is blank without it, and ink with it.
 --install: on Windows, install each TrueType font made for the current user, replacing the
   previous installation of the font, if any.
+--open: diff opens the image it makes, as a double-click would.
 """
 
 JSON_NAME = "fon.json"
@@ -1075,7 +1077,7 @@ def read_png_grid(path, image, sheet, width, height, invert=False):
     return [width] * len(glyphs), glyphs
 
 
-def diff(first, second):
+def diff(first, second, open_result=False):
     """Compare two images as ink on paper, and write FIRST.diff.png."""
     images = []
     for path in (first, second):
@@ -1106,6 +1108,11 @@ def diff(first, second):
     back_up(target)
     result.save(target, "PNG")
     print("Made %s of %s and %s." % (shown(target), shown(first), shown(second)))
+    if open_result:
+        if sys.platform == "win32":
+            os.startfile(target)
+        else:
+            subprocess.call(["xdg-open" if sys.platform != "darwin" else "open", target])
     return 0
 
 
@@ -4830,7 +4837,8 @@ VERBS = (
         " bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names)", ("rows", "patches", "unpack", "invert")),
-    ("diff", diff, "FIRST.png|FIRST.psd", "the first image to compare", None, ("second",)),
+    ("diff", diff, "FIRST.png|FIRST.psd", "the first image to compare", None,
+        ("second", "open")),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
@@ -4865,6 +4873,7 @@ OPTIONS = {
     "columns": "the pixel columns of a glyph to repeat or to leave out, counted from 0, as"
         " 0,3,7",
     "second": "the second image to compare",
+    "open": "open the diff image after making it",
     "sources": "the TrueType fonts to merge, or the directories that unpack or ttf made of"
         " them; a char that two of them have is taken from the first",
 }
@@ -4987,7 +4996,7 @@ def main():
         elif option == "patches":
             parser.add_argument("--codepage-patches", dest=option, metavar="LIST",
                 help=OPTIONS[option])
-        elif option in ("unpack", "invert", "install"):
+        elif option in ("unpack", "invert", "install", "open"):
             parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
         elif option == "sources":
             parser.add_argument(option, metavar="SOURCE", nargs="+", help=OPTIONS[option])

@@ -336,6 +336,17 @@ class DiffTest(unittest.TestCase):
         target = os.path.join(self.directory, "first.diff.png")
         self.assertEqual(self.colors(target), self.expected())
 
+    def test_open_option_launches_generated_image(self):
+        first = self.image("first.png", {1, 2})
+        second = self.image("second.png", {1, 3})
+        argv = ["pxfont", "diff", "--open", first, second]
+        with mock.patch.object(pxfont.os, "startfile", create=True) as opened, mock.patch.object(
+                pxfont.sys, "platform", "win32"), mock.patch.object(pxfont.sys, "argv", argv):
+            status, output = run_verb(pxfont.main)
+        self.assertEqual(status, 0, output)
+        target = os.path.join(self.directory, "first.diff.png")
+        opened.assert_called_once_with(target)
+
     def test_psd_diff(self):
         first = self.image("photoshop.psd", {1, 2})
         second = self.image("other.psd", {1, 3})
