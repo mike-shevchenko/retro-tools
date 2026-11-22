@@ -214,6 +214,23 @@ class BdfTest(unittest.TestCase):
         self.assertIn("3 chars", output)
         self.assertIn("same glyphs and metrics", output)
 
+    @unittest.skipIf(pxfont.FontBuilder is None, "needs fontTools")
+    def test_existing_ttf_backup_is_replaced(self):
+        status, output = self.run_verb(pxfont.ttf, self.path, None, None, None, None, None,
+            False)
+        self.assertEqual(status, 0, output)
+        font = os.path.join(self.directory, "tiny.ttf")
+        backup = font + pxfont.BACKUP_SUFFIX
+        with open(font, "rb") as handle:
+            previous = handle.read()
+        with open(backup, "wb") as handle:
+            handle.write(b"stale backup")
+        status, output = self.run_verb(pxfont.ttf, self.path, None, None, None, None, None,
+            False)
+        self.assertEqual(status, 0, output)
+        with open(backup, "rb") as handle:
+            self.assertEqual(handle.read(), previous)
+
     def test_vertical_font_is_refused(self):
         path = self.write("tall.bdf", TINY.replace("CHARS 6", "METRICSSET 1\nCHARS 6"))
         with self.assertRaises(pxfont.Failure):
@@ -265,6 +282,40 @@ class BitmapTest(unittest.TestCase):
             with open(os.path.splitext(path)[0] + ".fon", "rb") as handle:
                 fonts = pxfont.parse_fon(handle.read(), pxfont.Report(quiet=True))[1]
             self.assertEqual(fonts[0][2][0], [[1, 1], [0, 1]])
+
+
+class BackupTest(unittest.TestCase):
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory)
+        self.target = os.path.join(self.directory, "font")
+        self.backup = self.target + pxfont.BACKUP_SUFFIX
+
+    def write(self, path, text):
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text)
+
+    def test_old_file_backup_is_replaced(self):
+        self.write(self.target, "current")
+        self.write(self.backup, "stale")
+        status, output = run_verb(pxfont.back_up, self.target)
+        self.assertIsNone(status, output)
+        self.assertFalse(os.path.exists(self.target))
+        with open(self.backup, encoding="ascii") as handle:
+            self.assertEqual(handle.read(), "current")
+
+    def test_old_directory_backup_is_replaced(self):
+        os.mkdir(self.target)
+        self.write(os.path.join(self.target, "current"), "current")
+        os.makedirs(os.path.join(self.backup, "stale"))
+        self.write(os.path.join(self.backup, "stale", "old"), "stale")
+        status, output = run_verb(pxfont.back_up, self.target)
+        self.assertIsNone(status, output)
+        self.assertFalse(os.path.exists(self.target))
+        self.assertFalse(os.path.exists(os.path.join(self.backup, "stale")))
+        with open(os.path.join(self.backup, "current"), encoding="ascii") as handle:
+            self.assertEqual(handle.read(), "current")
 
 
 class WinInstallTest(unittest.TestCase):

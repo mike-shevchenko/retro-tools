@@ -66,7 +66,7 @@ def find_script(script):
 
 
 def remove_backups(font):
-    """Delete the .BAK of a font and of its directory: pxfont.py does not overwrite one."""
+    """Delete backups before agat_font_converter, which does not replace them."""
     for path in (font + ".BAK", font + ".files.BAK"):
         if os.path.isdir(path):
             print(f"Deleting {path!r}", flush=True)
@@ -96,7 +96,6 @@ def main():
 
     failed = []
     for source, patches, aliases in FONTS:
-        remove_backups(os.path.join(HERE, os.path.splitext(source)[0] + ".ttf"))
         command = pxfont + ["ttf", "--unpack", "--codepage", CODEPAGE]
         if patches:
             command += ["--codepage-patches", patches]
@@ -116,7 +115,6 @@ def main():
             failed.append(chart)
     if len(agat_fonts) == len(AGAT_CHARTS):
         merged = os.path.join(HERE, AGAT_MERGED + ".ttf")
-        remove_backups(merged)
         if not (run(pxfont + ["merge", AGAT_MERGED] + agat_fonts)
                 and unpack_anew(pxfont, merged)):
             failed.append(AGAT_MERGED)

@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -2064,21 +2065,18 @@ def name_fonts(fonts):
             font["png"] = name + ".png"
 
 
-def check_backup(path):
-    """Refuse to go on when the target exists and its backup name is taken as well."""
-    if os.path.lexists(path) and os.path.lexists(path + BACKUP_SUFFIX):
-        show = shown_directory if os.path.isdir(path) else shown
-        die("%s exists, and so does %s; move one of them away"
-            % (show(path), show(path + BACKUP_SUFFIX)))
-
-
 def back_up(path):
-    """Move an existing file or directory out of the way, to its backup name."""
-    check_backup(path)
+    """Move an existing file or directory out of the way, replacing its previous backup."""
     if os.path.lexists(path):
+        backup = path + BACKUP_SUFFIX
+        if os.path.lexists(backup):
+            if os.path.isdir(backup) and not os.path.islink(backup):
+                shutil.rmtree(backup)
+            else:
+                os.remove(backup)
         show = shown_directory if os.path.isdir(path) else shown
-        os.rename(path, path + BACKUP_SUFFIX)
-        print("Renamed the existing %s to %s" % (show(path), show(path + BACKUP_SUFFIX)))
+        os.rename(path, backup)
+        print("Renamed the existing %s to %s" % (show(path), show(backup)))
 
 
 def fnt_bytes(font, widths, glyphs):
@@ -2134,7 +2132,6 @@ def unpack_file(path, name, patches=None):
     """Unpack a font file. The patches of the code page are for a TrueType font."""
     set_encoding(name or DEFAULT_ENCODING)
     directory = path + FILES_SUFFIX
-    check_backup(directory)
     with open(path, "rb") as handle:
         data = handle.read()
     if data[:4] in SFNT_MAGICS:
@@ -2252,7 +2249,6 @@ def fon(target, name, rows, then_unpack, invert=False):
             die("%s holds %s font, which the verb %s makes; a .fon is not made of one"
                 % (shown_directory(directory), kind, verb))
     path = fon_path_of(directory)
-    check_backup(path)
     data = build_from(directory, lambda message: note("Warning: " + message), name)
     back_up(path)
     with open(path, "wb") as handle:
@@ -2420,9 +2416,6 @@ def fon_bitmaps(path, name, rows, then_unpack, invert=False):
     """Make a file of one font from its bitmaps alone or from its .fnt file, and unpack it
     if told."""
     target = os.path.splitext(path)[0] + ".fon"
-    check_backup(target)
-    if then_unpack:
-        check_backup(target + FILES_SUFFIX)
     if is_fnt(path) and rows is not None:
         die(ROWS_MISPLACED)
     if is_fnt(path) and invert:
@@ -2457,7 +2450,6 @@ def create(name, encoding_name):
     if not os.path.isdir(os.path.dirname(path) or "."):
         die("there is no directory %s to create %s in"
             % (shown_directory(os.path.dirname(path)), shown_directory(directory)))
-    check_backup(directory)
     codes = list(range(NEW_FIRST_CHAR, NEW_FIRST_CHAR + NEW_ROWS * CHARS_PER_ROW))
     widths = [width] * len(codes)
     glyphs = [[[0] * width for _y in range(height)] for _code in codes]
@@ -3310,7 +3302,6 @@ def ttf_of_files(directory, em, aliases, patches, then_unpack, install=False):
             die("--%s is not for %s: %s there tells it"
                 % (option, shown_directory(directory), TTF_JSON))
     path = fon_path_of(directory)
-    check_backup(path)
     data = build_ttf_from(directory)
     back_up(path)
     with open(path, "wb") as handle:
@@ -3377,9 +3368,6 @@ def ttf_of_bdf(data, source, name, em, places, then_unpack, install=False):
     family = family or bdf_font_name(model) or os.path.splitext(os.path.basename(source))[0]
     style = STYLES[(bold, italic)]
     path = os.path.join(os.path.dirname(source), file_name(full_name(family, style)) + ".ttf")
-    check_backup(path)
-    if then_unpack:
-        check_backup(path + FILES_SUFFIX)
     above, below = model["rows_above_baseline"], model["rows_below_baseline"]
     blank = [[0] * usual_width(cells) for _y in range(above + below)]
     bitmaps = {MISSING_GLYPH: cells[MISSING_GLYPH][1] if MISSING_GLYPH in cells else blank}
@@ -3459,10 +3447,6 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False, ins
         return ttf_of_bdf(found[0], found[1], name, em, places, then_unpack, install)
     fonts, source, report = fon_fonts(target, name, rows, "a TrueType", invert)
     targets = ttf_targets(source, fonts)
-    for path, _family, _style in targets:
-        check_backup(path)
-        if then_unpack:
-            check_backup(path + FILES_SUFFIX)
     built = []
     for (font, widths, glyphs, _where), (_path, family, style) in zip(fonts, targets):
         header = font["header"]
@@ -4245,10 +4229,6 @@ def bdf(target, name, rows, patches, then_unpack, invert=False):
                     % shown(target))
     fonts, source, report = fon_fonts(target, name, rows, "a BDF", invert)
     targets = ttf_targets(source, fonts, ".bdf")
-    for path, _family, _style in targets:
-        check_backup(path)
-        if then_unpack:
-            check_backup(path + FILES_SUFFIX)
 
     def warn(message):
         note("Warning: " + message)
@@ -4295,7 +4275,6 @@ def bdf_of_files(directory, name, rows, patches, then_unpack):
             die("--%s is not for %s: %s there tells it"
                 % (option, shown_directory(directory), BDF_JSON))
     path = fon_path_of(directory)
-    check_backup(path)
     data = build_bdf_from(directory, lambda message: note("Warning: " + message))
     back_up(path)
     with open(path, "wb") as handle:
@@ -4422,7 +4401,6 @@ def alter_file(path, rows, change):
     target = os.path.join(os.path.dirname(path), changed_name(os.path.basename(base), change,
         " %dx%dpx" % (new_width, height) if new_width != width else None)) + (
         ".txt" if extension.lower() == ".txt" else ".png")
-    check_backup(target)
     changed = [change.glyph(glyph) for glyph in glyphs]
     sheet = fon_sheet(NEW_FIRST_CHAR, NEW_FIRST_CHAR + len(glyphs) - 1)
     if extension.lower() == ".txt":
@@ -4649,8 +4627,6 @@ def alter_directory(directory, name, change, home, source, warn):
         data, size = alter_fon(directory, name, change, warn)
     font = os.path.join(home, changed_name(root, change, size) + extension)
     target = font + FILES_SUFFIX
-    check_backup(target)
-    check_backup(font)
     if truetype:
         write_ttf_files(target, model, sheet, cells, root)
         data, count = build_ttf_from(target), 1
@@ -4768,8 +4744,6 @@ def merge(target, name, sources):
     names["family"] = family
     font = os.path.join(home, family + ".ttf")
     directory = font + FILES_SUFFIX
-    check_backup(directory)
-    check_backup(font)
     write_ttf_files(directory, model, ttf_sheet(chars, glyphs, page_of(model)), cells, family)
     data = build_ttf_from(directory)
     back_up(font)
