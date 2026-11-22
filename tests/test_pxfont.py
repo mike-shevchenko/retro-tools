@@ -14,6 +14,7 @@ import io
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -282,6 +283,73 @@ class BitmapTest(unittest.TestCase):
             with open(os.path.splitext(path)[0] + ".fon", "rb") as handle:
                 fonts = pxfont.parse_fon(handle.read(), pxfont.Report(quiet=True))[1]
             self.assertEqual(fonts[0][2][0], [[1, 1], [0, 1]])
+
+
+@unittest.skipIf(pxfont.Image is None, "pxfont needs Pillow")
+class DiffTest(unittest.TestCase):
+    WHITE = (255, 255, 255, 255)
+    BLACK = (0, 0, 0, 255)
+    RED = (255, 0, 0, 255)
+    BLUE = (0, 0, 255, 255)
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory)
+
+    def image(self, name, ink, size=(6, 1), paper=WHITE):
+        image = pxfont.Image.new("RGBA", size, paper)
+        pixels = image.load()
+        for x in ink:
+            pixels[x, 0] = self.BLACK
+        path = os.path.join(self.directory, name)
+        if name.endswith(".psd"):
+            self.write_psd(path, image)
+        else:
+            image.save(path, "PNG")
+        return path
+
+    @staticmethod
+    def write_psd(path, image):
+        rgb = image.convert("RGB")
+        data = rgb.tobytes()
+        header = struct.pack(">4sH6sHIIHH", b"8BPS", 1, bytes(6), 3, rgb.size[1],
+            rgb.size[0], 8, 3)
+        with open(path, "wb") as handle:
+            handle.write(header + struct.pack(">IIIH", 0, 0, 0, 0))
+            for channel in range(3):
+                handle.write(data[channel::3])
+
+    def colors(self, path):
+        with pxfont.Image.open(path) as image:
+            data = image.convert("RGBA").tobytes()
+        return [tuple(data[at:at + 4]) for at in range(0, len(data), 4)]
+
+    def expected(self):
+        return [self.WHITE, self.BLACK, self.RED, self.BLUE, self.WHITE, self.WHITE]
+
+    def test_png_diff_uses_four_colors(self):
+        first = self.image("first.png", {1, 2})
+        second = self.image("second.png", {1, 3}, paper=(192, 192, 192, 255))
+        result = subprocess.run([sys.executable, pxfont.__file__, "diff", first, second],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        target = os.path.join(self.directory, "first.diff.png")
+        self.assertEqual(self.colors(target), self.expected())
+
+    def test_psd_diff(self):
+        first = self.image("photoshop.psd", {1, 2})
+        second = self.image("other.psd", {1, 3})
+        status, output = run_verb(pxfont.diff, first, second)
+        self.assertEqual(status, 0, output)
+        target = os.path.join(self.directory, "photoshop.diff.png")
+        self.assertEqual(self.colors(target), self.expected())
+
+    def test_images_must_have_same_size(self):
+        first = self.image("first.png", {1, 2})
+        second = self.image("small.png", set(), size=(2, 1))
+        with self.assertRaisesRegex(pxfont.Failure, "same size"):
+            run_verb(pxfont.diff, first, second)
+        self.assertFalse(os.path.exists(os.path.join(self.directory, "first.diff.png")))
 
 
 class BackupTest(unittest.TestCase):

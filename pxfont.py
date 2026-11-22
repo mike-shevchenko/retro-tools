@@ -50,6 +50,7 @@ pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N]
     FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack] [--invert]
     FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
+pxfont diff FIRST.png|FIRST.psd SECOND.png|SECOND.psd
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
 pxfont merge [--codepage NAME] FONT FILE.ttf|DIR.files...
 pxfont --win-install
@@ -64,6 +65,9 @@ ttf: make the font of DIR.ttf.files/; or make a TrueType file of every font of a
   a BDF font, each pixel a square, exact at --em pixels to the em (unless told, the height)
   and its multiples.
 bdf: make the font of DIR.bdf.files/; or make a Unicode BDF file of every font of a .fon.
+diff: make FIRST.diff.png of two equally large images, each read as one ink-on-paper cell:
+  black for ink in both, red for ink only in the first, blue for ink only in the second, and
+  white where neither has ink.
 expand, contract: repeat, or leave out, the pixel columns COLUMNS of every glyph: "0,3,7".
 bold, italic, bold-italic: lay each glyph over itself a pixel to the right; move the upper
   half of each cell a pixel to the right. These five write a new image, or directory and font.
@@ -1021,10 +1025,8 @@ def color_distance(color, paper):
     return (most * color[3] + 127) // 255
 
 
-def read_png_grid(path, image, sheet, width, height, invert=False):
-    """The widths and glyphs of a PNG without the full coloring: only its size tells the
-    chars apart, so all are equally wide. The prevailing color of the first cell is the
-    paper; any other color is paper or ink by its distance from that one."""
+def ink_classifier(path, image, width, height, invert=False):
+    """The ink test of a plain image: the prevailing color of its first cell is the paper."""
     pixels = image.load()
     colors = collections.Counter(pixels[x, y] for y in range(height) for x in range(width))
     paper = colors.most_common(1)[0][0]
@@ -1043,6 +1045,14 @@ def read_png_grid(path, image, sheet, width, height, invert=False):
             kinds[color] = int(distance >= INK_DISTANCE)
         return kinds[color] ^ invert
 
+    return inked, paper, kinds
+
+
+def read_png_grid(path, image, sheet, width, height, invert=False):
+    """The widths and glyphs of a PNG without the full coloring: only its size tells the
+    chars apart, so all are equally wide. The prevailing color of the first cell is the
+    paper; any other color is paper or ink by its distance from that one."""
+    inked, paper, kinds = ink_classifier(path, image, width, height, invert)
     glyphs = []
     for r, row in enumerate(sheet):
         for c, key in enumerate(row):
@@ -1063,6 +1073,40 @@ def read_png_grid(path, image, sheet, width, height, invert=False):
         "%d color(s) far from it" % inks if inks else "nowhere",
         "; --invert swaps ink and paper" if invert else ""))
     return [width] * len(glyphs), glyphs
+
+
+def diff(first, second):
+    """Compare two images as ink on paper, and write FIRST.diff.png."""
+    images = []
+    for path in (first, second):
+        try:
+            with Image.open(path) as source:
+                images.append(source.convert("RGBA"))
+        except (OSError, ValueError) as error:
+            die("%s cannot be read as an image: %s" % (shown(path), error))
+    if images[0].size != images[1].size:
+        die("%s is %dx%d, but %s is %dx%d; diff needs two images of the same size"
+            % ((shown(first),) + images[0].size + (shown(second),) + images[1].size))
+    classifiers = []
+    for path, image in zip((first, second), images):
+        inked, paper, _kinds = ink_classifier(path, image, *image.size)
+        classifiers.append(inked)
+        print("%s: the paper is %s, as the prevailing color of the image."
+            % (shown(path), color_name(paper)))
+
+    white, black = (255, 255, 255, 255), (0, 0, 0, 255)
+    red, blue = (255, 0, 0, 255), (0, 0, 255, 255)
+    result = Image.new("RGBA", images[0].size, white)
+    pixels = result.load()
+    for y in range(result.size[1]):
+        for x in range(result.size[0]):
+            one, two = (inked(x, y) for inked in classifiers)
+            pixels[x, y] = black if one and two else red if one else blue if two else white
+    target = os.path.splitext(first)[0] + ".diff.png"
+    back_up(target)
+    result.save(target, "PNG")
+    print("Made %s of %s and %s." % (shown(target), shown(first), shown(second)))
+    return 0
 
 
 def text_lines(sheet, cells, height, gap, bare=None):
@@ -4758,8 +4802,7 @@ ALTERED = ("FILE.fon|FILE.ttf|FILE.bdf|FILE%s|FONT.png|FONT.psd|FONT.txt" % FILE
     "the font file, the directory that unpack made, or the bitmaps of one fixed-pitch font",
     "the code page of the texts of a .fon file (default: the one %s records)" % JSON_NAME)
 # A verb as its name, its function, its argument and the help for it, the help for
-# --codepage, and its other options: columns, which is an argument before the other one,
-# and numbers, all passed on in this order.
+# --codepage (None when absent), and its other arguments and options in call order.
 VERBS = (
     ("unpack", unpack, "FILE.fon|FILE.ttf|FILE.bdf",
         "the .fon file, the TrueType font or the BDF font to unpack",
@@ -4787,6 +4830,7 @@ VERBS = (
         " bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names)", ("rows", "patches", "unpack", "invert")),
+    ("diff", diff, "FIRST.png|FIRST.psd", "the first image to compare", None, ("second",)),
     ("expand", expand) + ALTERED + (("columns", "rows"),),
     ("contract", contract) + ALTERED + (("columns", "rows"),),
     ("bold", bold) + ALTERED + (("rows",),),
@@ -4820,6 +4864,7 @@ OPTIONS = {
         " glyph of a missing char, or another char of the font",
     "columns": "the pixel columns of a glyph to repeat or to leave out, counted from 0, as"
         " 0,3,7",
+    "second": "the second image to compare",
     "sources": "the TrueType fonts to merge, or the directories that unpack or ttf made of"
         " them; a char that two of them have is taken from the first",
 }
@@ -4934,7 +4979,8 @@ def main():
     if "columns" in options:
         parser.add_argument("columns", metavar="COLUMNS", help=OPTIONS["columns"])
     parser.add_argument("target", metavar=target, help=target_help)
-    parser.add_argument("--codepage", metavar="NAME", help=encoding_help)
+    if encoding_help is not None:
+        parser.add_argument("--codepage", metavar="NAME", help=encoding_help)
     for option in options:
         if option == "aliases":
             parser.add_argument("--" + option, metavar="LIST", help=OPTIONS[option])
@@ -4945,6 +4991,8 @@ def main():
             parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
         elif option == "sources":
             parser.add_argument(option, metavar="SOURCE", nargs="+", help=OPTIONS[option])
+        elif option == "second":
+            parser.add_argument(option, metavar="SECOND.png|SECOND.psd", help=OPTIONS[option])
         elif option != "columns":
             parser.add_argument("--" + option, metavar="N", type=int, help=OPTIONS[option])
     args = parser.parse_args(argv[1:])
@@ -4953,7 +5001,11 @@ def main():
     # A name in another script must not stop a message on a console that lacks it.
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(errors="backslashreplace")
-    return run(args.target, args.codepage, *(getattr(args, option) for option in options))
+    arguments = [args.target]
+    if encoding_help is not None:
+        arguments.append(args.codepage)
+    arguments.extend(getattr(args, option) for option in options)
+    return run(*arguments)
 
 
 if __name__ == "__main__":
