@@ -9,6 +9,7 @@ See pxfont --help.
 import argparse
 import codecs
 import collections
+import ctypes
 import datetime
 import functools
 import io
@@ -44,7 +45,8 @@ pxfont fon [--codepage NAME] [--rows N] [--unpack] [--invert]
     DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont create [--codepage NAME] FONT
 pxfont ttf [--codepage NAME] [--codepage-patches LIST] [--aliases LIST] [--em N] [--rows N]
-    [--unpack] [--invert] FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
+    [--unpack] [--invert] [--install]
+    FILE.fon|FILE.bdf|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont bdf [--codepage NAME] [--codepage-patches LIST] [--rows N] [--unpack] [--invert]
     FILE.fon|DIR.files|FONT.png|FONT.psd|FONT.txt|FONT.fnt
 pxfont expand COLUMNS|contract COLUMNS|bold|italic|bold-italic [--rows N] FILE.fon|DIR.files|...
@@ -113,6 +115,8 @@ BDF: a cell is as wide as the advance, DWIDTH, and as high as the line, FONT_ASC
 --unpack: fon, ttf and bdf then unpack the font that they made, into FILE.files/, for a check.
 --invert: for standalone PNG or Photoshop bitmaps, swap ink and paper; a first cell of one
   color is blank without it, and ink with it.
+--install: on Windows, install each TrueType font made for the current user, replacing the
+  previous installation of the font, if any.
 """
 
 JSON_NAME = "fon.json"
@@ -3297,7 +3301,7 @@ def ttf_targets(source, fonts, extension=".ttf"):
     return out
 
 
-def ttf_of_files(directory, em, aliases, patches, then_unpack):
+def ttf_of_files(directory, em, aliases, patches, then_unpack, install=False):
     """Make the TrueType font of the files that unpack wrote of one."""
     if then_unpack:
         die(UNPACK_MISPLACED % shown_directory(directory))
@@ -3312,6 +3316,8 @@ def ttf_of_files(directory, em, aliases, patches, then_unpack):
     with open(path, "wb") as handle:
         handle.write(data)
     print("Made %s of %s." % (shown(path), shown_directory(directory)))
+    if install:
+        install_ttf(path)
     return 0
 
 
@@ -3360,7 +3366,7 @@ def bdf_source(target):
     return None
 
 
-def ttf_of_bdf(data, source, name, em, places, then_unpack):
+def ttf_of_bdf(data, source, name, em, places, then_unpack, install=False):
     """Make the TrueType font of a BDF font. The chars of a font that is not of Unicode are
     those of its codes in the code page."""
     set_encoding(name or DEFAULT_ENCODING)
@@ -3424,11 +3430,15 @@ def ttf_of_bdf(data, source, name, em, places, then_unpack):
     print("Made %s: the family %r, %s, %d chars, ascent %d; exact at %d pixels to the em, which"
         " is %g points at 96 dpi, and at its multiples." % (shown(path), family, style,
         len(cmap), info["ascent"], size, size * 72 / 96))
+    if install:
+        install_ttf(path)
     return unpack_file(path, page.name, page.patches) if then_unpack else 0
 
 
-def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False):
+def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False, install=False):
     need_fonttools()
+    if install and sys.platform != "win32":
+        die("--install is for Windows")
     if em is not None and em < 1:
         die("--em must be 1 or more pixels")
     pairs = parse_aliases(aliases) if aliases is not None else []
@@ -3436,7 +3446,7 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False):
     if os.path.isfile(os.path.join(target, TTF_JSON)):
         if invert:
             die(INVERT_MISPLACED)
-        return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack)
+        return ttf_of_files(target.rstrip("/\\"), em, aliases, patches, then_unpack, install)
     found = None if is_bitmaps(target) or is_fnt(target) else bdf_source(target)
     if found:
         if invert:
@@ -3446,7 +3456,7 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False):
         if aliases is not None:
             die("--aliases is for the fonts of a .fon file; a BDF font has its chars by its"
                 " codes")
-        return ttf_of_bdf(found[0], found[1], name, em, places, then_unpack)
+        return ttf_of_bdf(found[0], found[1], name, em, places, then_unpack, install)
     fonts, source, report = fon_fonts(target, name, rows, "a TrueType", invert)
     targets = ttf_targets(source, fonts)
     for path, _family, _style in targets:
@@ -3473,6 +3483,9 @@ def ttf(target, name, rows, em, aliases, patches, then_unpack, invert=False):
             " the em, which is %g points at 96 dpi, and at its multiples."
             % (shown(path), family, style, count, chars, header["dfAscent"], size,
             size * 72 / 96))
+    if install:
+        for path, _family, _style in targets:
+            install_ttf(path)
     if report.errors:
         note("%s has %d error(s), so its fonts may be damaged; unpack tells what they are"
             % (shown(target), report.errors))
@@ -4794,7 +4807,7 @@ VERBS = (
         " font file, the bitmaps of one fixed-pitch font, or one font as a .fnt file",
         "the code page of the chars and of the texts (default: for the chars, the one that"
         " dfCharSet names, or for a BDF font that is not of Unicode, its registry)",
-        ("rows", "em", "aliases", "patches", "unpack", "invert")),
+        ("rows", "em", "aliases", "patches", "unpack", "invert", "install")),
     ("bdf", bdf, "FILE.fon|FILE%s|FONT.png|FONT.psd|FONT.txt|FONT.fnt" % FILES_SUFFIX,
         "the .fon file, the directory that unpack made of a .fon file or of a BDF font, the"
         " bitmaps of one fixed-pitch font, or one font as a .fnt file",
@@ -4813,6 +4826,7 @@ VERBS = (
 WIN_MENU_EXTENSIONS = (".ttf", ".fon", ".bdf")
 WIN_MENU_KEY = r"Software\Classes\SystemFileAssociations\%s\shell\pxfont-unpack"
 WIN_MENU_TEXT = "Unpack with pxfont"
+WIN_FONTS_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
 OPTIONS = {
     "rows": "for the bitmaps alone: how many rows of %d chars they are (default: what the"
         " size in the file name gives, or %d)" % (CHARS_PER_ROW, NEW_ROWS),
@@ -4824,6 +4838,8 @@ OPTIONS = {
         " does: to check what the font has" % FILES_SUFFIX,
     "invert": "for standalone PNG or Photoshop bitmaps without full coloring: swap ink and"
         " paper; a first cell of one color is blank without this, and ink with it",
+    "install": "on Windows, install each font made for the current user, replacing the"
+        " previous installation of the font, if any",
     "aliases": "more Unicode chars for the glyphs of the font, as"
         " 00A9=.notdef,U+00A3=0060,2191=005E for the copyright sign, the pound and the up"
         " arrow of ZX Spectrum: each is a char, then what gives it the glyph: .notdef for the"
@@ -4833,6 +4849,75 @@ OPTIONS = {
     "sources": "the TrueType fonts to merge, or the directories that unpack or ttf made of"
         " them; a char that two of them have is taken from the first",
 }
+
+
+def install_ttf(path):
+    """Install a TrueType font for the current Windows user, replacing its previous copy."""
+    if sys.platform != "win32":
+        die("--install is for Windows")
+    import winreg
+
+    with open(path, "rb") as handle:
+        data = handle.read()
+    font = TTFont(io.BytesIO(data))
+    try:
+        name = font["name"].getDebugName(4)
+    finally:
+        font.close()
+    if not name:
+        die("%s has no full font name for Windows to register" % shown(path))
+    value_name = name + " (TrueType)"
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        die("--install needs LOCALAPPDATA to locate the current user's Fonts directory")
+    directory = os.path.join(local, "Microsoft", "Windows", "Fonts")
+    os.makedirs(directory, exist_ok=True)
+    installed = os.path.join(directory, os.path.basename(path))
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32.AddFontResourceW.argtypes = [ctypes.c_wchar_p]
+    gdi32.AddFontResourceW.restype = ctypes.c_int
+    gdi32.RemoveFontResourceW.argtypes = [ctypes.c_wchar_p]
+    gdi32.RemoveFontResourceW.restype = ctypes.c_int
+    user32.SendMessageTimeoutW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t,
+        ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t)]
+    user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, WIN_FONTS_KEY) as key:
+        try:
+            previous = winreg.QueryValueEx(key, value_name)[0]
+        except FileNotFoundError:
+            previous = None
+        if previous:
+            previous = os.path.expandvars(previous)
+            if not os.path.isabs(previous):
+                previous = os.path.join(directory, previous)
+        removed = set()
+        for old_path in (previous, installed):
+            if not old_path:
+                continue
+            identity = os.path.normcase(os.path.abspath(old_path))
+            if identity not in removed:
+                gdi32.RemoveFontResourceW(old_path)
+                removed.add(identity)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=directory, prefix=".pxfont-",
+                    suffix=".tmp", delete=False) as handle:
+                temporary = handle.name
+                handle.write(data)
+            os.replace(temporary, installed)
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.remove(temporary)
+        winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, installed)
+
+    if not gdi32.AddFontResourceW(installed):
+        die("%s is installed, but Windows could not load it into the current session"
+            % shown(installed))
+    result = ctypes.c_size_t()
+    user32.SendMessageTimeoutW(0xFFFF, 0x001D, 0, 0, 0x0002, 1000, ctypes.byref(result))
+    print("Installed %s as %r for the current user." % (shown(installed), name))
 
 
 def win_install():
@@ -4882,7 +4967,7 @@ def main():
         elif option == "patches":
             parser.add_argument("--codepage-patches", dest=option, metavar="LIST",
                 help=OPTIONS[option])
-        elif option in ("unpack", "invert"):
+        elif option in ("unpack", "invert", "install"):
             parser.add_argument("--" + option, action="store_true", help=OPTIONS[option])
         elif option == "sources":
             parser.add_argument(option, metavar="SOURCE", nargs="+", help=OPTIONS[option])

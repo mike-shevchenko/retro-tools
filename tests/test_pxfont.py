@@ -103,7 +103,11 @@ ENDFONT
 
 def run_verb(verb, *args):
     """Run a verb; return its exit status and what it printed."""
-    output = io.StringIO()
+    class Output(io.StringIO):
+        def reconfigure(self, **_kwargs):
+            pass
+
+    output = Output()
     with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
         status = verb(*args)
     return status, output.getvalue()
@@ -286,6 +290,89 @@ class WinInstallTest(unittest.TestCase):
         self.assertEqual([call.args[0] for call in values], [key, command_key] * 3)
         for extension in pxfont.WIN_MENU_EXTENSIONS:
             self.assertIn(extension, output)
+
+
+@unittest.skipIf(pxfont.Image is None or pxfont.FontBuilder is None,
+    "pxfont needs Pillow and fontTools")
+class WinTtfInstallTest(unittest.TestCase):
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory)
+        self.source = os.path.join(self.directory, "tiny.bdf")
+        with open(self.source, "w", encoding="ascii", newline="\n") as handle:
+            handle.write(TINY)
+        self.output = os.path.join(self.directory, "tiny.ttf")
+        self.local = os.path.join(self.directory, "local")
+        self.fonts = os.path.join(self.local, "Microsoft", "Windows", "Fonts")
+        self.installed = os.path.join(self.fonts, "tiny.ttf")
+
+    def run_install(self, previous=None):
+        registry = mock.Mock()
+        registry.HKEY_CURRENT_USER = object()
+        registry.REG_SZ = 1
+        key = mock.MagicMock()
+        key.__enter__.return_value = key
+        registry.CreateKey.return_value = key
+        if previous is None:
+            registry.QueryValueEx.side_effect = FileNotFoundError
+        else:
+            registry.QueryValueEx.return_value = (previous, registry.REG_SZ)
+        gdi32 = mock.Mock()
+        gdi32.AddFontResourceW.return_value = 1
+        user32 = mock.Mock()
+        argv = ["pxfont", "ttf", "--install", self.source]
+        argv_patch = mock.patch.object(pxfont.sys, "argv", argv)
+        with mock.patch.dict(sys.modules, {"winreg": registry}), mock.patch.object(
+                pxfont.sys, "platform", "win32"), mock.patch.dict(
+                os.environ, {"LOCALAPPDATA": self.local}), mock.patch.object(
+                pxfont.ctypes, "WinDLL", side_effect=[gdi32, user32], create=True), argv_patch:
+            status, output = run_verb(pxfont.main)
+        self.registry = registry
+        self.key = key
+        self.gdi32 = gdi32
+        self.user32 = user32
+        return status, output
+
+    def test_ttf_installs_generated_font_for_current_user(self):
+        status, output = self.run_install()
+        self.assertEqual(status, 0, output)
+        self.registry.CreateKey.assert_called_once_with(
+            self.registry.HKEY_CURRENT_USER, pxfont.WIN_FONTS_KEY)
+        self.registry.QueryValueEx.assert_called_once_with(self.key, "tiny (TrueType)")
+        self.registry.SetValueEx.assert_called_once_with(
+            self.key, "tiny (TrueType)", 0, self.registry.REG_SZ, self.installed)
+        with open(self.output, "rb") as handle:
+            made = handle.read()
+        with open(self.installed, "rb") as handle:
+            self.assertEqual(handle.read(), made)
+        self.gdi32.RemoveFontResourceW.assert_called_once_with(self.installed)
+        self.gdi32.AddFontResourceW.assert_called_once_with(self.installed)
+        self.user32.SendMessageTimeoutW.assert_called_once()
+        self.assertEqual(os.listdir(self.fonts), ["tiny.ttf"])
+        self.assertIn("for the current user", output)
+
+    def test_install_replaces_previous_copy_and_registration(self):
+        os.makedirs(self.fonts)
+        with open(self.installed, "wb") as handle:
+            handle.write(b"previous font")
+        status, output = self.run_install(self.installed)
+        self.assertEqual(status, 0, output)
+        with open(self.output, "rb") as handle:
+            made = handle.read()
+        with open(self.installed, "rb") as handle:
+            installed = handle.read()
+        self.assertEqual(installed, made)
+        self.assertNotEqual(installed, b"previous font")
+        self.gdi32.RemoveFontResourceW.assert_called_once_with(self.installed)
+        self.registry.SetValueEx.assert_called_once_with(
+            self.key, "tiny (TrueType)", 0, self.registry.REG_SZ, self.installed)
+
+    def test_install_is_refused_outside_windows(self):
+        with mock.patch.object(pxfont.sys, "platform", "linux"):
+            with self.assertRaisesRegex(pxfont.Failure, "--install is for Windows"):
+                pxfont.ttf(self.source, None, None, None, None, None, False, False, True)
+        self.assertFalse(os.path.exists(self.output))
 
 
 def unicode_bdf(family, glyphs, ascent=5):
